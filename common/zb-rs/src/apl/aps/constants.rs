@@ -1,0 +1,13 @@
+use crate::nwk::constants::MAX_NWK_PAYLOAD_SIZE;
+
+pub const MAX_DESCRIPTOR_SIZE: usize = 64;
+pub const MAX_FRAME_RETRIES: u8 = 3;
+// pub const MAX_ACK_WAIT_DURATION = 0.05 * 2 * NWK_MAX_DEPTH + 0.1;
+pub const MIN_DUPLICATE_REJECTION_TABLE_SIZE: u8 = 1;
+pub const MIN_HEADER_OVERHEAD: usize = 0x0c;
+pub const PARENT_ANNOUNCE_BASE_TIMER_SECONDS: f32 = 10.0;
+pub const PARENT_ANNOUNCE_JITTER_MAX_SECONDS: f32 = 10.0;
+
+pub const MAX_APS_PAYLOAD_SIZE: usize = MAX_NWK_PAYLOAD_SIZE - MIN_HEADER_OVERHEAD;
+pub const MAX_APS_FRAME_SIZE: usize = 2048;
+

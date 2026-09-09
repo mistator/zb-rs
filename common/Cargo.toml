@@ -1,0 +1,38 @@
+[workspace.package]
+repository = "https://github.com/mistator/zb-rs"
+readme = "README.md"
+edition = "2024"
+license = "CC-BY-NC-SA-4.0"
+categories = ["network-programming", "no-std", "embedded"]
+
+[workspace]
+members = [
+    "zb-hal",
+    "zb-hal-test-mock",
+    "zb-macros",
+    "zb-rs",
+    "zb-types",
+    "zb-zcl-clusters",
+]
+
+resolver = "3"
+
+[workspace.dependencies]
+bon = { version = "3.9.3", default-features = false }
+byte = { version = "0.2.7", default-features = false }
+byte-derive = { version = "0.3.0" }
+embassy-executor = { version = "0.10.0", default-features = false }
+embassy-futures = { version = "0.1.2", default-features = false }
+embassy-sync = { version = "0.8.0", default-features = false }
+embassy-time = { version = "0.5.0", default-features = false }
+heapless = { version = "0.9.1", default-features = false, features = ["bytes"] }
+ieee802154 = { version = "0.6.1", default-features = false }
+itertools = { version = "0.15.0", default-features = false }
+log = { version = "0.4.29", default-features = false }
+thiserror = { version = "2.0.19", default-features = false }
+
+zb-hal = { path = "./zb-hal", version = "0.1.0" }
+zb-macros = { path = "./zb-macros", version = "0.1.0" }
+zb-rs = { path = "./zb-rs", version = "0.1.0" }
+zb-types = { path = "./zb-types", version = "0.1.0" }
+zb-zcl-clusters = { path = "./zb-zcl-clusters", version = "0.1.0" }

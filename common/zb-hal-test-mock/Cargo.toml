@@ -1,0 +1,17 @@
+[package]
+name = "zb-hal-test-mock"
+version = "0.1.0"
+description = "zb-hal in-memory implementation for testing"
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+categories.workspace = true
+
+[lib]
+name = "zb_hal_test_mock"
+
+[dependencies]
+bon = {workspace = true}
+byte = { workspace = true }
+zb-hal = { workspace = true }
+zb-types = { workspace = true }

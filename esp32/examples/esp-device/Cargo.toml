@@ -1,0 +1,50 @@
+[package]
+name = "esp-device"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = [
+    "esp32c6"
+]
+esp32c6 = [
+    "esp-alloc/esp32c6",
+    "esp-backtrace/esp32c6",
+    "esp-hal/esp32c6",
+    "esp-println/esp32c6",
+    "esp-radio/esp32c6",
+    "esp-rtos/esp32c6",
+    "esp-storage/esp32c6",
+    "zb-hal-esp32/esp32c6"
+]
+
+[dependencies]
+byte = { version = "0.2.7", default-features = false }
+
+esp-alloc = { version = "0.10.0" }
+esp-backtrace = { version = "0.19.0", features = ["panic-handler", "println"] }
+esp-bootloader-esp-idf = { workspace = true }
+esp-hal = { workspace = true, default-features = true }
+esp-println = { version = "0.17.0", features = ["log-04"] }
+esp-radio = { workspace = true }
+esp-rtos = { version = "0.3.0", features = ["embassy", "log-04"] }
+esp-storage = { workspace = true }
+
+embassy-executor = { workspace = true }
+embassy-futures = { workspace = true }
+embassy-sync = { workspace = true }
+embassy-time = { workspace = true }
+
+log = { workspace = true }
+
+zb-hal-esp32 = { path = "./../../zb-hal-esp32", version = "0.1.0" }
+zb-rs = { workspace = true }
+zb-types = { workspace = true }
+zb-zcl-clusters = { workspace = true }
+
+[[bin]]
+name = "esp-device"
+doctest = false
+test = false
+bench = false
+

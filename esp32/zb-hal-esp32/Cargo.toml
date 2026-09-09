@@ -1,0 +1,37 @@
+[package]
+name = "zb-hal-esp32"
+version = "0.1.0"
+description = "Zigbee HAL implementation for ESP32 devices"
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+categories.workspace = true
+
+[lib]
+name = "zb_hal_esp32"
+test = false
+doctest = false
+bench = false
+
+[features]
+default = ["esp32c6"]
+esp32c6 = [
+    "esp-radio/esp32c6",
+    "esp-storage/esp32c6",
+    "esp-bootloader-esp-idf/esp32c6"
+]
+
+[dependencies]
+bon = { workspace = true }
+byte = { workspace = true }
+embassy-sync = { workspace = true }
+embedded-storage = { workspace = true }
+esp-bootloader-esp-idf = { workspace = true }
+esp-hal = { workspace = true }
+esp-radio = { workspace = true }
+esp-storage = { workspace = true }
+log = { workspace = true }
+ieee802154 = { workspace = true }
+
+zb-types = { workspace = true }
+zb-hal = { workspace = true }

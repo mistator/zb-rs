@@ -1,0 +1,20 @@
+[package]
+name = "zb-macros"
+version = "0.1.0"
+description = "Helper macros and macros used for defining ZCL objects"
+repository.workspace = true
+edition.workspace = true
+license.workspace = true
+categories.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3.0.5", features = ["full"] }
+quote = { version = "1.0.45" }
+proc-macro2 = { version = "1.0.106" }
+
+[dev-dependencies]
+byte = { version = "0.2.7" }
+byte-derive = "0.3.0"

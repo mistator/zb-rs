@@ -1,0 +1,6 @@
+[toolchain]
+channel = "stable"
+profile = "default"
+targets = [
+    "riscv32imac-unknown-none-elf"
+]
