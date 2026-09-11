@@ -341,9 +341,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
                     Command::NetworkReport(_) => {}
                     Command::NetworkUpdate(_) => {}
                     Command::LinkPowerDelta(_) => {}
-                    _ => {
-                        self.handle_end_device_commands(mac_src_address, header, cmd_frame.command).await;
-                    }
+                    _ => {}
                 }
 
             }
@@ -989,7 +987,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
     }
 }
 
-impl<T: JoinedDevice, D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<T>>, D, S> {
+impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<EndDevice>>, D, S> {
     async fn handle_end_device_commands(&mut self, mac_src_addr: NwkAddress, header: NwkHeader, mut cmd: Command) -> Option<NwkIndication> {
         match cmd {
             Command::EndDeviceTimeoutResponse(ref mut cmd) => {
