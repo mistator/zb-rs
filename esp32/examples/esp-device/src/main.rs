@@ -112,8 +112,8 @@ async fn button_push(app: Arc<Mutex<CriticalSectionRawMutex, Box<dyn ZigbeeAppli
 
     button.wait_for_high().await;
 
-    let app = app.lock().await;
-    let output = app.as_any().downcast_ref::<OnOffOutput>().unwrap();
+    let mut app = app.lock().await;
+    let output = app.as_any_mut().downcast_mut::<OnOffOutput>().unwrap();
 
     output.onoff.toggle();
 }
@@ -202,7 +202,7 @@ async fn main(spawner: embassy_executor::Spawner) -> ! {
     let switch: Arc<Mutex<CriticalSectionRawMutex, Box<dyn ZigbeeApplication>>> =
         Arc::new(Mutex::new(Box::new(on_off_output)));
 
-    let map = ZbApplicationsDef::new();
+    let mut map = ZbApplicationsDef::new();
     spawner.spawn(button_push(switch.clone()).unwrap());
     map.insert(ApsEndpoint::new(1).unwrap(), switch).ok();
 

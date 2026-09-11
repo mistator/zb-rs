@@ -84,6 +84,7 @@ pub const MAX_CLUSTERS_PER_APP: usize = 8;
 
 pub trait BaseApplication {
     fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
     fn get_device(&self) -> ZbDevice;
     fn get_version(&self) -> u8;
     fn get_clusters(&self) -> zb_types::Vec<&dyn ZclCluster, MAX_CLUSTERS_PER_APP>;
@@ -142,6 +143,10 @@ macro_rules! define_application {
 
         impl$(<$lifetime>)? zigbee::apl::application::types::BaseApplication for $name$(<$lifetime>)? {
             fn as_any(&self) -> &dyn core::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
                 self
             }
 
