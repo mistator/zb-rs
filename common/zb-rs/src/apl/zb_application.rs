@@ -61,7 +61,7 @@ impl<S: StorageRegion> ZbApplicationsMap<S> {
             let app = self.applications.get(&app_idx).unwrap();
             let offset = (APPLICATION_STORAGE_SIZE * idx) as u32;
 
-            if let Ok(()) = self.stg.load_with_offset(offset, &mut bytes).await {
+            if let Ok(()) = self.stg.load_with_offset(offset, &mut bytes) {
                 let mut guard = app.lock().await;
                 guard.load(&bytes).map_err(|err| {
                     log::warn!("error loading app data from persistent storage: {:?}", err);
@@ -95,7 +95,7 @@ impl<S: StorageRegion> ZbApplicationsMap<S> {
             result
         };
 
-        self.stg.persist(buffer.as_slice()).await.map_err(UseAppError::from)?;
+        self.stg.persist(buffer.as_slice()).map_err(UseAppError::from)?;
         Ok(result)
     }
 }

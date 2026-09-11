@@ -134,10 +134,10 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         }
     }
 
-    pub async fn load_or_default(nwk: N, mut stg: S) -> ApsContext<N, S> {
+    pub fn load_or_default(nwk: N, mut stg: S) -> ApsContext<N, S> {
         let mut buffer = [0u8; APS_STORAGE_SIZE];
 
-        stg.load(&mut buffer).await.ok();
+        stg.load(&mut buffer).ok();
         let persistent_data = buffer.read_with::<ApsPersistentData>(&mut 0, byte::LE)
             .map_err(|err| {
                 log::warn!("failed to load persistent ApsContext data: {:?}, using default context", err);
@@ -148,8 +148,8 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         Self::new(nwk, stg, persistent_data.binding_table, persistent_data.group_table)
     }
 
-    pub async fn persist(&mut self) -> Result<(), StorageError> {
-        self.nwk.persist().await?;
+    pub fn persist(&mut self) -> Result<(), StorageError> {
+        self.nwk.persist()?;
 
         let persistent = ApsPersistentData {
             binding_table: self.binding_table.clone(),
@@ -158,8 +158,8 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         let mut buffer = [0u8; APS_STORAGE_SIZE];
         buffer.write_with(&mut 0, persistent, byte::LE)?;
 
-        self.stg.persist(&buffer).await?;
-        self.nwk.persist().await
+        self.stg.persist(&buffer)?;
+        self.nwk.persist()
     }
 }
 

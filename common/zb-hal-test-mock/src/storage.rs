@@ -16,19 +16,19 @@ impl MemoryStorage {
 }
 
 impl zb_hal::StorageRegion for MemoryStorage {
-    async fn persist_with_offset(&mut self, offset: u32, buffer: &[u8]) -> Result<(), StorageError> {
+    fn persist_with_offset(&mut self, offset: u32, buffer: &[u8]) -> Result<(), StorageError> {
         self.buffer
             .write_with(&mut (offset as usize), buffer, ())
             .map_err(|err| StorageError::ByteError(err))
     }
 
-    async fn load_with_offset(&mut self, offset: u32, buffer: &mut [u8]) -> Result<(), StorageError> {
+    fn load_with_offset(&mut self, offset: u32, buffer: &mut [u8]) -> Result<(), StorageError> {
         let off = offset as usize;
         buffer.copy_from_slice(&self.buffer[off..off + buffer.len()]);
         Ok(())
     }
 
-    async fn clear(&mut self) -> Result<(), StorageError> {
+    fn clear(&mut self) -> Result<(), StorageError> {
         self.buffer = [0u8; 1024 * 16];
         Ok(())
     }

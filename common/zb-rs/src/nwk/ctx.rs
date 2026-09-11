@@ -389,9 +389,8 @@ pub trait LocalNwkTransmit : NwkInitialized {
     async fn transmit_data_frame(&mut self, nsdu: &[u8], config: &DataFrameConfig) -> Result<(), NldeTransferError>;
 }
 
-#[trait_variant::make(NwkJoined: Send)]
-pub trait LocalNwkJoined : NwkListen + NwkTransmit {
-    async fn persist(&mut self) -> Result<(), StorageError>;
+pub trait NwkJoined : NwkListen + NwkTransmit {
+    fn persist(&mut self) -> Result<(), StorageError>;
     fn get_children(&self) -> Option<&NeighborTable>;
 
     fn get_children_mut(&mut self) -> Option<&mut NeighborTable> {
@@ -666,8 +665,8 @@ impl<T: NwkState, D: NwkMac, S: StorageRegion> BaseNwk for Nwk<T, D, S> {
     }
 }
 
-impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkRouter for Nwk<Initialized<Joined<Router>>, D, S> {}
-impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkEndDevice for Nwk<Initialized<Joined<EndDevice>>, D, S> {}
+impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkRouter for Nwk<Initialized<Joined<Router>>, D, S> {}
+impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkEndDevice for Nwk<Initialized<Joined<EndDevice>>, D, S> {}
 
 impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<PendingRejoin>, D, S> {
     pub fn make_end_device(self) -> Nwk<Initialized<Joined<EndDevice>>, D, S> {
@@ -713,10 +712,10 @@ pub struct LoadNwkError<D: NwkMac, S: StorageRegion> {
 }
 
 impl<T: NwkState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
-    pub async fn load(mac: Mlme<D>, mut stg: S) -> Result<Nwk<Initialized<PendingRejoin>, D, S>, LoadNwkError<D, S>> {
+    pub fn load(mac: Mlme<D>, mut stg: S) -> Result<Nwk<Initialized<PendingRejoin>, D, S>, LoadNwkError<D, S>> {
         let mut buffer = [0u8; NWK_STORAGE_SIZE];
 
-        match stg.load(&mut buffer).await {
+        match stg.load(&mut buffer) {
             Ok(_) => {}
             Err(err) => {
                 log::warn!("error loading ctx: {:?}", err);
@@ -767,14 +766,14 @@ impl<T: NwkState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
 
 }
 
-impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkJoined for Nwk<Initialized<Joined<EndDevice>>, D, S> {
-    async fn persist(&mut self) -> Result<(), StorageError> {
+impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkJoined for Nwk<Initialized<Joined<EndDevice>>, D, S> {
+    fn persist(&mut self) -> Result<(), StorageError> {
         let persistent = make_persistence_end_device(&self.ctx);
 
         let mut buffer = [0u8; NWK_STORAGE_SIZE];
         buffer.write_with(&mut 0, persistent, byte::LE)?;
 
-        self.stg.persist(&buffer).await
+        self.stg.persist(&buffer)
     }
 
     fn get_children(&self) -> Option<&NeighborTable> {
@@ -802,15 +801,15 @@ impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkJoined for Nwk<Initialized<Jo
     }
 }
 
-impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkJoined for Nwk<Initialized<Joined<Router>>, D, S> {
-    async fn persist(&mut self) -> Result<(), StorageError> {
+impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkJoined for Nwk<Initialized<Joined<Router>>, D, S> {
+    fn persist(&mut self) -> Result<(), StorageError> {
         let mut persistent = make_persistence_end_device(&self.ctx);
         persistent.neighbor_table = Some(self.get_router_ctx().children.clone());
 
         let mut buffer = [0u8; 1024];
         buffer.write_with(&mut 0, persistent, byte::LE)?;
 
-        self.stg.persist(&buffer).await
+        self.stg.persist(&buffer)
     }
 
     fn get_children(&self) -> Option<&NeighborTable> {

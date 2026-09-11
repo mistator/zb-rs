@@ -82,9 +82,9 @@ pub async fn initialize<D, P, S>(
     mut pool: P,
 ) -> InitializedNode<D, Nwk<Initialized<ctx::Joined<EndDevice>>, D, S>, S>
 where
-    D: NwkMac + Sync,
+    D: NwkMac + Sync + Send,
     P: StoragePool<S = S>,
-    S: StorageRegion + Sync,
+    S: StorageRegion + Sync + Send,
 {
 
     log::info!("initializing device...");
@@ -96,7 +96,7 @@ where
     let mut apps = ZbApplicationsMap::new(applications, apps_stg);
     apps.load_all().await;
 
-    match Nwk::<Uninitialized, _, _>::load(mac, nwk_stg).await {
+    match Nwk::<Uninitialized, _, _>::load(mac, nwk_stg) {
         Ok(nwk) => {
             if config.is_end_device() {
                 let request = NlmeRejoinRequest {
@@ -109,7 +109,7 @@ where
                 log::info!("device is already on a network, rejoining...");
                 match nwk.rejoin(&request).await {
                     Ok(nwk) => {
-                        let aps_ctx = ApsContext::load_or_default(nwk, aps_stg).await;
+                        let aps_ctx = ApsContext::load_or_default(nwk, aps_stg);
                         let mut node = ZbNode {
                             config,
                             spawner,
@@ -121,7 +121,7 @@ where
                         };
 
                         node.emit_device_annce().await.ok();
-                        node.ctx.aps.persist().await.ok();
+                        node.ctx.aps.persist().ok();
 
                         InitializedNode::Joined(node)
                     }
@@ -144,7 +144,7 @@ where
                     }
                 }
             } else {
-                let aps = ApsContext::load_or_default(nwk.make_end_device(), aps_stg).await;
+                let aps = ApsContext::load_or_default(nwk.make_end_device(), aps_stg);
 
                 InitializedNode::Joined(ZbNode {
                     config,
@@ -189,8 +189,8 @@ type ZbNodeTransition<D, N, S> =
 
 impl<D, S> ZbNode<UnjoinedCtx<D, S>, S>
 where
-    D: NwkMac + Sync,
-    S: StorageRegion + Sync,
+    D: NwkMac + Sync + Send,
+    S: StorageRegion + Sync + Send,
 {
     pub async fn network_steering(mut self) -> ZbNodeTransition<D, Nwk<Initialized<ctx::Joined<EndDevice>>, D, S>, S> {
         let primary_channel_set = self.config.primary_channel_set;
@@ -239,7 +239,7 @@ where
                 log::warn!("trying to connect to nd: {:?}", nd);
                 match self.ctx.nwk.association_join(nd, req).await {
                     Ok(value) => {
-                        let ctx = ApsContext::load_or_default(value, self.ctx.aps_stg).await;
+                        let ctx = ApsContext::load_or_default(value, self.ctx.aps_stg);
 
                         let mut node = ZbNode::<JoinedCtx<Nwk<Initialized<ctx::Joined<EndDevice>>, D, S>, S>, S> {
                             config: self.config,
@@ -329,8 +329,8 @@ where
 
 impl<D, S> ZbNode<JoinedCtx<Nwk<Initialized<ctx::Joined<EndDevice>>, D, S>, S>, S>
 where
-    D: NwkMac + Sync,
-    S: StorageRegion + Sync,
+    D: NwkMac + Sync + Send,
+    S: StorageRegion + Sync + Send,
 {
     fn to_unjoined(self) -> ZbNode<UnjoinedCtx<D, S>, S> {
         let nwk = self.ctx.aps.nwk;

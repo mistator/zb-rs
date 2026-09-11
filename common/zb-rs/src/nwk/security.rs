@@ -14,7 +14,7 @@ use crate::nwk::frame::header::NwkHeader;
 use zb_hal::{NwkMac, StorageRegion};
 
 impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S> {
-    pub async fn encrypt_frame(
+    pub fn encrypt_frame(
         &mut self,
         frame: &NwkFrame,
         buffer: &mut [u8],
@@ -82,7 +82,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
         result
     }
 
-    pub async fn decrypt_frame(
+    pub fn decrypt_frame(
         &self,
         frame_buffer: &mut [u8],
     ) -> Result<(NwkFrame, bool), SecurityError> {
@@ -171,33 +171,33 @@ mod tests {
         0xef, 0xca, 0x8d, 0x96, 0xd5, 0x3e, 0xb2, 0x35, 0x8b, 0x8, 0x88, 0x17, 0xd4
     ];
 
-    #[futures_test::test]
-    async fn test_decrypt_nwk_frame() {
+    #[test]
+    fn test_decrypt_nwk_frame() {
         let mut frame_buffer = ENC_NWK_FRAME;
 
         let nwk = Nwk::end_device().call();
-        let (frame, _) = nwk.decrypt_frame(&mut frame_buffer).await.unwrap();
+        let (frame, _) = nwk.decrypt_frame(&mut frame_buffer).unwrap();
 
         assert!(matches!(frame, NwkFrame::Data(_)));
     }
 
-    #[futures_test::test]
-    async fn decrypt_and_encrypt_nwk_frame() {
+    #[test]
+    fn decrypt_and_encrypt_nwk_frame() {
         let mut frame_buffer = ENC_NWK_FRAME;
         let mut nwk = Nwk::end_device()
             .ext_addr(ENC_NWK_FRAME_SRC_ADDR)
             .outgoing_frame_counter(ENC_NWK_FRAME_FRAME_COUNTER)
             .call();
 
-        let (frame, _) = nwk.decrypt_frame(&mut frame_buffer).await.unwrap();
-        let offset = nwk.encrypt_frame(&frame, &mut frame_buffer).await.unwrap();
+        let (frame, _) = nwk.decrypt_frame(&mut frame_buffer).unwrap();
+        let offset = nwk.encrypt_frame(&frame, &mut frame_buffer).unwrap();
 
         assert_eq!(offset, ENC_NWK_FRAME.len());
         assert_eq!(frame_buffer, ENC_NWK_FRAME);
     }
 
-    #[futures_test::test]
-    async fn encrypt_nwk_frame() {
+    #[test]
+    fn encrypt_nwk_frame() {
         let mut buffer = [0x0u8; 127];
         let payload = NWK_FRAME_PAYLOAD;
 
@@ -217,7 +217,7 @@ mod tests {
             .build();
         let frame = NwkFrame::new_data_frame(hdr, Vec::from_slice(payload.as_slice()).unwrap());
 
-        let len = nwk.encrypt_frame(&frame, &mut buffer).await.unwrap();
+        let len = nwk.encrypt_frame(&frame, &mut buffer).unwrap();
 
         assert_eq!(len, ENC_NWK_FRAME.len());
         assert_eq!(buffer[..len], ENC_NWK_FRAME);

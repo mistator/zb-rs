@@ -1,5 +1,5 @@
+use embassy_sync::blocking_mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
 use embedded_storage::ReadStorage;
 use embedded_storage::Storage;
 use esp_bootloader_esp_idf::partitions;
@@ -10,10 +10,10 @@ use zb_hal::{StorageError, StoragePool, StorageRegion};
 
 static mut PT_MEM: &'static mut [u8; partitions::PARTITION_TABLE_MAX_LEN] =
     &mut [0; partitions::PARTITION_TABLE_MAX_LEN];
-static DRIVER: Mutex<
+static DRIVER: blocking_mutex::Mutex<
     CriticalSectionRawMutex,
     Option<(FlashStorage<'static>, PartitionEntry<'static>)>,
-> = Mutex::new(None);
+> = blocking_mutex::Mutex::new(None);
 
 #[derive(Clone, Copy, Debug)]
 pub struct EspStoragePool {
@@ -33,8 +33,12 @@ impl<'a> EspStoragePool {
             .unwrap()
             .unwrap();
 
-        let mut lck = DRIVER.lock().await;
-        *lck = Some((flash, nvs));
+        // SAFETY: not called within another lock/lock_mut
+        unsafe {
+            DRIVER.lock_mut(|drv| {
+                *drv = Some((flash, nvs))
+            })
+        };
 
         Self { total_size: nvs.len(), idx: 0 }
     }
@@ -63,33 +67,38 @@ impl StoragePool for EspStoragePool {
 pub struct EspStorageRegion(u32, u32);
 
 impl StorageRegion for EspStorageRegion {
-    async fn persist_with_offset(&mut self, offset: u32, buffer: &[u8]) -> Result<(), StorageError> {
+    fn persist_with_offset(&mut self, offset: u32, buffer: &[u8]) -> Result<(), StorageError> {
         if buffer.len() > self.1 as usize {
             return Err(StorageError::ByteError(byte::Error::BadInput {
                 err: "maximum length exceeded",
             }));
         }
 
-        {
-            let mut lck = DRIVER.lock().await;
-            let (flash, nvs) = lck.as_mut().unwrap();
-
-            let mut nvs = nvs.as_embedded_storage(flash);
-            nvs.write(self.0 + offset, buffer)
-                .map_err(|_| StorageError::NvsError)
+        // SAFETY: not called within another lock/lock_mut
+        unsafe {
+            DRIVER.lock_mut(|drv| {
+                let (flash, nvs) = drv.as_mut().unwrap();
+                let mut nvs = nvs.as_embedded_storage(flash);
+                nvs.write(self.0 + offset, buffer)
+                    .map_err(|_| StorageError::NvsError)
+            })
         }
     }
 
-    async fn load_with_offset(&mut self, offset: u32, buffer: &mut [u8]) -> Result<(), StorageError> {
-        let mut lck = DRIVER.lock().await;
-        let (flash, nvs) = lck.as_mut().unwrap();
+    fn load_with_offset(&mut self, offset: u32, buffer: &mut [u8]) -> Result<(), StorageError> {
+        // SAFETY: not called within another lock/lock_mut
+        unsafe {
+            DRIVER.lock_mut(|drv| {
+                let (flash, nvs) = drv.as_mut().unwrap();
 
-        let mut nvs = nvs.as_embedded_storage(flash);
-        nvs.read(self.0 + offset, buffer)
-            .map_err(|_| StorageError::NvsError)
+                let mut nvs = nvs.as_embedded_storage(flash);
+                nvs.read(self.0 + offset, buffer)
+                    .map_err(|_| StorageError::NvsError)
+            })
+        }
     }
 
-    async fn clear(&mut self) -> Result<(), StorageError> {
+    fn clear(&mut self) -> Result<(), StorageError> {
         todo!()
     }
 }

@@ -49,18 +49,17 @@ pub trait StoragePool {
     fn reserve_region(&mut self, size: u32) -> Result<Self::S, ()>;
 }
 
-#[trait_variant::make(StorageRegion: Send)]
-pub trait LocalStorageRegion : Clone {
-    async fn persist_with_offset(&mut self, offset: u32, buffer: &[u8]) -> Result<(), StorageError>;
-    async fn load_with_offset(&mut self, offset: u32, buffer: &mut [u8]) -> Result<(), StorageError>;
+pub trait StorageRegion : Clone {
+    fn persist_with_offset(&mut self, offset: u32, buffer: &[u8]) -> Result<(), StorageError>;
+    fn load_with_offset(&mut self, offset: u32, buffer: &mut [u8]) -> Result<(), StorageError>;
 
-    fn persist(&mut self, buffer: &[u8]) -> impl Future<Output=Result<(), StorageError>> {
+    fn persist(&mut self, buffer: &[u8]) -> Result<(), StorageError> {
         self.persist_with_offset(0, buffer)
     }
 
-    fn load(&mut self, buffer: &mut [u8]) -> impl Future<Output=Result<(), StorageError>> {
+    fn load(&mut self, buffer: &mut [u8]) -> Result<(), StorageError> {
         self.load_with_offset(0, buffer)
     }
 
-    async fn clear(&mut self) -> Result<(), StorageError>;
+    fn clear(&mut self) -> Result<(), StorageError>;
 }

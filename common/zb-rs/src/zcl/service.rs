@@ -52,7 +52,6 @@ async fn persist_application<S: StorageRegion>(
 
     if let Some(_) = result.ok() {
         stg.persist(buffer.as_slice()) // TODO
-            .await
             .ok();
     } else {
         log::warn!("could not write application to storage");

@@ -30,7 +30,7 @@ pub struct DataFrameConfig {
     pub security_disable: bool,
 }
 
-impl<D: NwkMac, S: StorageRegion> NwkTransmit for Nwk<Initialized<Joined<Router>>, D, S> {
+impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkTransmit for Nwk<Initialized<Joined<Router>>, D, S> {
     async fn transmit_data_frame(
         &mut self,
         nsdu: &[u8],
@@ -61,7 +61,7 @@ impl<D: NwkMac, S: StorageRegion> NwkTransmit for Nwk<Initialized<Joined<Router>
     }
 }
 
-impl<T: ED + Send, D: NwkMac, S: StorageRegion> NwkTransmit for Nwk<Initialized<T>, D, S> {
+impl<T: ED + Sync + Send, D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkTransmit for Nwk<Initialized<T>, D, S> {
     async fn transmit_data_frame(
         &mut self,
         nsdu: &[u8],
@@ -100,7 +100,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
         ack: bool,
     ) -> Result<(), NldeTransferError> {
         let mut mac_payload = [0u8; A_MAX_MAC_PAYLOAD_SIZE];
-        let length = self.build_mac_payload(frame, &mut mac_payload).await?;
+        let length = self.build_mac_payload(frame, &mut mac_payload)?;
 
         self.mac
             .data_transmit_request(dst_address, &mac_payload[..length], ack)
@@ -108,7 +108,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
             .map_err(|err| NldeTransferError::McpsDataError(err))
     }
 
-    pub async fn build_mac_payload(
+    pub fn build_mac_payload(
         &mut self,
         frame: &NwkFrame,
         buffer: &mut [u8; A_MAX_MAC_PAYLOAD_SIZE],
@@ -116,7 +116,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
         let length = if frame.is_secured()
             && !matches!(frame, NwkFrame::Reserved(_) | NwkFrame::InterPan(_))
         {
-            self.encrypt_frame(frame, buffer).await?
+            self.encrypt_frame(frame, buffer)?
         } else {
             let offset = &mut 0;
             buffer.write_with(offset, frame.header().clone(), byte::LE)?;
@@ -242,7 +242,7 @@ pub(super) struct TransmitBroadcastFrameCfg {
 impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
     pub(super) async fn transmit_broadcast_frame(&mut self, frame: &NwkDataFrame) -> () {
         let mut mac_payload = [0u8; A_MAX_MAC_PAYLOAD_SIZE];
-        let payload_len = match self.build_mac_payload(&NwkFrame::Data(frame.clone()), &mut mac_payload).await {
+        let payload_len = match self.build_mac_payload(&NwkFrame::Data(frame.clone()), &mut mac_payload) {
             Ok(result) => result,
             Err(_) => return,
         };

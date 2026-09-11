@@ -46,7 +46,6 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
                         None => continue,
                         Some(_) => {
                             match self.decrypt_frame(indication.payload.as_mut_slice())
-                                .await
                             {
                                 Err(err) => {
                                     log::warn!("error decrypting network frame: {:?}", err);
@@ -68,7 +67,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
     }
 }
 
-impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkListen for Nwk<Initialized<Joined<Router>>, D, S> {
+impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkListen for Nwk<Initialized<Joined<Router>>, D, S> {
     // 3.6.2.2
     async fn listen_nwk(&mut self, is_authorized: bool) -> NwkIndication {
         loop {
@@ -98,12 +97,12 @@ impl<D: NwkMac, S: StorageRegion> NwkListen for Nwk<Initialized<Joined<EndDevice
 
  */
 
-impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkListen for Nwk<Initialized<PendingRejoin>, D, S> {
+impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkListen for Nwk<Initialized<PendingRejoin>, D, S> {
     async fn listen_nwk(&mut self, is_authorized: bool) -> NwkIndication {
         loop {
             let result = match self.get_mac_indication().await {
                 MacIndication::Data(indication) => {
-                    self.handle_data_indication(is_authorized, indication).await
+                    self.handle_data_indication(is_authorized, indication)
                 }
                 _ => None,
             };
@@ -115,7 +114,7 @@ impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkListen for Nwk<Initialized<Pe
     }
 }
 
-impl<D: NwkMac + Sync, S: StorageRegion + Sync> NwkListen for Nwk<Initialized<Joined<EndDevice>>, D, S> {
+impl <D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkListen for Nwk<Initialized<Joined<EndDevice>>, D, S> {
     async fn listen_nwk(&mut self, is_authorized: bool) -> NwkIndication {
         loop {
             let result = match self.get_mac_indication().await {
@@ -213,8 +212,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
         mut indication: McpsDataIndication,
     ) -> Option<NwkIndication> {
         let (frame, use_security) = self
-            .process_incoming_indication(&mut indication, is_authorized)
-            .await?;
+            .process_incoming_indication(&mut indication, is_authorized)?;
 
         if !self.handle_end_device_frame(&frame) {
             return None;
@@ -849,12 +847,12 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
         }
     }
 
-    async fn process_incoming_indication(
+    fn process_incoming_indication(
         &mut self,
         indication: &mut McpsDataIndication,
         is_authorized: bool,
     ) -> Option<(NwkFrame, bool)> {
-        let (mut frame, use_security) = self.decrypt_frame(indication.payload.as_mut_slice()).await.ok()?;
+        let (mut frame, use_security) = self.decrypt_frame(indication.payload.as_mut_slice()).ok()?;
 
         // On receipt of each frame, the radius field of the NWK header shall be
         // decremented by 1.
@@ -1007,15 +1005,13 @@ impl<T: JoinedDevice, D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<T>>, D
 
         None
     }
-}
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<EndDevice>>, D, S> {
     async fn handle_data_indication(
         &mut self,
         is_authorized: bool,
         mut indication: McpsDataIndication,
     ) -> Option<NwkIndication> {
-        let (frame, security_use) = self.process_incoming_indication(&mut indication, is_authorized).await?;
+        let (frame, security_use) = self.process_incoming_indication(&mut indication, is_authorized)?;
 
         match frame {
             NwkFrame::Data(ref dataframe) => {
@@ -1045,12 +1041,12 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<EndDevice>>, D, S> {
 }
 
 impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<PendingRejoin>, D, S> {
-    async fn handle_data_indication(
+    fn handle_data_indication(
         &mut self,
         is_authorized: bool,
         mut indication: McpsDataIndication,
     ) -> Option<NwkIndication> {
-        let (frame, security_use) = self.process_incoming_indication(&mut indication, is_authorized).await?;
+        let (frame, security_use) = self.process_incoming_indication(&mut indication, is_authorized)?;
 
         match frame {
             NwkFrame::Data(ref dataframe) => {
