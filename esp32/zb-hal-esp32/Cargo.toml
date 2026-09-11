@@ -1,6 +1,6 @@
 [package]
 name = "zb-hal-esp32"
-version = "0.1.0"
+version = "0.1.1"
 description = "Zigbee HAL implementation for ESP32 devices"
 repository.workspace = true
 edition.workspace = true
@@ -31,7 +31,6 @@ esp-hal = { workspace = true }
 esp-radio = { workspace = true }
 esp-storage = { workspace = true }
 log = { workspace = true }
-ieee802154 = { workspace = true }
 
 zb-types = { workspace = true }
 zb-hal = { workspace = true }

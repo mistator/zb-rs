@@ -2232,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "zb-hal-esp32"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bon",
  "byte",
@@ -2242,7 +2242,6 @@ dependencies = [
  "esp-hal",
  "esp-radio",
  "esp-storage",
- "ieee802154",
  "log",
  "zb-hal",
  "zb-types",

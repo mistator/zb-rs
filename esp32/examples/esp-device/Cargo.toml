@@ -37,7 +37,7 @@ embassy-time = { workspace = true }
 
 log = { workspace = true }
 
-zb-hal-esp32 = { path = "./../../zb-hal-esp32", version = "0.1.0" }
+zb-hal-esp32 = { path = "./../../zb-hal-esp32", version = "0.1.1" }
 zb-rs = { workspace = true }
 zb-types = { workspace = true }
 zb-zcl-clusters = { workspace = true }
