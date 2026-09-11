@@ -46,6 +46,6 @@ trait-variant = "0.1.3"
 critical-section = { version = "1.2.0", features = ["std"] }
 embassy-executor = { workspace = true, features = ["platform-std"] }
 embassy-sync = { workspace = true, features = ["std"] }
-embassy-time = { workspace = true, features = ["std"] }
+embassy-time = { workspace = true, features = ["generic-queue-32", "std"] }
 futures-test = "0.3.33"
 zb-hal-test-mock = { path = "../zb-hal-test-mock", version = "0.1.0", default-features = false }

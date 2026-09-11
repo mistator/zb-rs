@@ -192,38 +192,3 @@ pub struct AssociationResponse {
     pub association_address: NwkAddress,
     pub status: AssociationStatus,
 }
-
-#[cfg(test)]
-pub mod tests {
-    use crate::mac::types::McpsDataIndication;
-    use crate::nwk::ctx::{Initialized, InitializedState, Nwk};
-    use crate::nwk::frame::NwkFrame;
-    use byte::TryWrite;
-    use zb_hal_test_mock::driver::MockDriver;
-    use zb_hal_test_mock::storage::MemoryStorage;
-    use zb_types::Vec;
-    use zb_types::common::PanId;
-    use zb_types::mac::{A_MAX_MAC_PAYLOAD_SIZE, MacAddress};
-
-    impl McpsDataIndication {
-        pub async fn from_frame<T: InitializedState>(nwk: &mut Nwk<Initialized<T>, MockDriver, MemoryStorage>, mut frame: NwkFrame) -> Self {
-            let src = MacAddress::Short(PanId::default(), frame.header().source);
-            let dest = MacAddress::Short(PanId::default(), frame.header().destination);
-
-            let mut bytes = [0u8; A_MAX_MAC_PAYLOAD_SIZE];
-            let size = if frame.header().control.security {
-                nwk.encrypt_frame(&mut frame, &mut bytes).await.unwrap()
-            } else {
-                NwkFrame::try_write(frame, &mut bytes, byte::LE).unwrap()
-            };
-
-            McpsDataIndication {
-                src_address: src.into(),
-                dest_address: dest.into(),
-                link_quality: 7,
-                payload: Vec::from_slice(&bytes[..size]).unwrap(),
-                dsn: 0,
-            }
-        }
-    }
-}

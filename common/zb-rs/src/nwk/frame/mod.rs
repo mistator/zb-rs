@@ -6,7 +6,7 @@ use byte::TryRead;
 use byte::TryWrite;
 use byte::ctx::Endian;
 use header::NwkHeader;
-
+use zb_macros::try_write_impl;
 use crate::nwk::commands::Command;
 use crate::nwk::constants::MAX_NWK_PAYLOAD_SIZE;
 use crate::nwk::frame::header::DiscoverRoute;
@@ -115,18 +115,19 @@ impl TryRead<'_, Endian> for NwkFrame {
     }
 }
 
-impl TryWrite<Endian> for NwkFrame {
+#[try_write_impl]
+impl TryWrite<Endian> for &NwkFrame {
     fn try_write(self, bytes: &mut [u8], ctx: Endian) -> byte::Result<usize> {
         let offset = &mut 0;
 
         match self {
             NwkFrame::Data(data) => {
-                bytes.write_with(offset, data.header, ctx)?;
+                bytes.write_with(offset, &data.header, ctx)?;
                 bytes.write_with(offset, data.payload.as_slice(), ())?;
             }
             NwkFrame::NwkCommand(cmd) => {
-                bytes.write_with(offset, cmd.header, ctx)?;
-                bytes.write_with(offset, cmd.command, ())?;
+                bytes.write_with(offset, &cmd.header, ctx)?;
+                bytes.write_with(offset, &cmd.command, ())?;
             }
             NwkFrame::Reserved(hdr) => bytes.write_with(offset, hdr, ctx)?,
             NwkFrame::InterPan(hdr) => bytes.write_with(offset, hdr, ctx)?,

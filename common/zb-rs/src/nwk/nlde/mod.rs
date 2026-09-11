@@ -51,6 +51,7 @@ impl Default for NldeDataIndicationDstAddress {
     }
 }
 
+#[derive(Debug)]
 pub enum NwkIndication {
     Data(NldeDataIndication),
     Join(NlmeJoinIndication),
@@ -69,18 +70,21 @@ pub struct NldeDataIndication {
     pub security_use: bool, // rx_time
 }
 
+#[derive(Debug)]
 pub enum JoinMethod {
     Association(MacCapabilities),
     Direct,
     Rejoin { secure: bool },
 }
 
+#[derive(Debug)]
 pub struct NlmeJoinIndication {
     pub(crate) nwk_addr: NwkAddress,
     pub(crate) ext_addr: ExtendedAddress,
     pub(crate) join_method: JoinMethod,
 }
 
+#[derive(Debug)]
 pub struct NlmeLeaveIndication {
     pub device_address: Option<ExtendedAddress>,
     pub rejoin: bool,
@@ -88,11 +92,13 @@ pub struct NlmeLeaveIndication {
 
 type NlmeNetworkStatusIndication = NetworkStatus;
 
+#[derive(Debug)]
 pub struct NlmeDutyCycleModeIndication {
     pub interface_index: u8,
     pub status: DutyCycleStatus,
 }
 
+#[derive(Debug)]
 pub enum DutyCycleStatus {
     Normal,
     Limited,

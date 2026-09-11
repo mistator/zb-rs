@@ -82,22 +82,8 @@ pub struct NwkNeighborJoinData {
     pub potential_parent: bool,
 }
 
-#[derive(Clone, Debug, Default, TryRead, TryWrite)]
+#[derive(Clone, Debug, Default, Deref, DerefMut, TryRead, TryWrite)]
 pub struct NeighborTable(zb_types::Vec<NwkNeighbor, 32>);
-
-impl Deref for NeighborTable {
-    type Target = zb_types::Vec<NwkNeighbor, 32>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for NeighborTable {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
 
 impl FromIterator<NwkNeighbor> for NeighborTable {
     fn from_iter<T: IntoIterator<Item = NwkNeighbor>>(iter: T) -> Self {
@@ -859,29 +845,62 @@ fn make_persistence_end_device<T: JoinedDevice>(ctx: &Initialized<Joined<T>>) ->
 
 #[cfg(test)]
 pub mod tests {
+    use ieee802154::mac;
+    use ieee802154::mac::{FrameContent, Header};
     use crate::common::information_base::ParentInformation;
     use crate::mac::mlme::Mlme;
-    use crate::nwk::ctx::{EndDevice, Initialized, Joined, NetworkSecurityMaterialDescriptor, NetworkSecurityMaterialDescriptorSet, Nwk, NwkNeighbor};
+    use crate::nwk::ctx::{EndDevice, Initialized, Joined, JoinedDevice, NeighborRelationship, NeighborTable, NetworkSecurityMaterialDescriptor, NetworkSecurityMaterialDescriptorSet, NewNwkNeighbour, Nwk, NwkListen, NwkNeighbor, Router};
     use crate::stack_profile::StackProfile;
     use rand::SeedableRng;
     use rand::rngs::SmallRng;
-    use zb_hal_test_mock::driver::MockDriver;
+    use zb_hal_test_mock::driver::{MockDriver, DEFAULT_NWK_ADDR, DEFAULT_EXT_ADDR, DEFAULT_NWK_PAN_ID};
     use zb_hal_test_mock::storage::MemoryStorage;
-    use zb_types::common::{ExtendedAddress, Key, NwkAddress, PanId};
-    use zb_types::mac::Channel;
+    use zb_types::common::{DeviceType, ExtendedAddress, Key, NwkAddress, PanId};
+    use zb_types::mac::{Channel, A_MAX_MAC_PAYLOAD_SIZE, MacFrame};
+    use zb_types::Vec;
+    use crate::nwk::frame::NwkFrame;
 
     const DEFAULT_NWK_KEY: Key = [
         0x01, 0x03, 0x05, 0x07, 0x09, 0x0b, 0x0d, 0x0f,
         0x00, 0x02, 0x04, 0x06, 0x08, 0x0a, 0x0c, 0x0d
     ];
 
-    pub const DEFAULT_EXT_ADDR: ExtendedAddress = ExtendedAddress(0x1234_5678_90ab_cdef);
-    pub const DEFAULT_NWK_ADDR: NwkAddress = NwkAddress(0x1234);
-    pub const DEFAULT_NWK_PAN_ID: PanId = PanId(0x1234);
+    impl<T: JoinedDevice> Nwk<Initialized<Joined<T>>, MockDriver, MemoryStorage> {
+        pub fn add_received_frame(&mut self, frame: &NwkFrame) -> () {
+            let mut mac_payload = [0u8; A_MAX_MAC_PAYLOAD_SIZE];
+            let length = self.build_mac_payload(frame, &mut mac_payload).unwrap();
+
+            let mac_frame = MacFrame {
+                header: Header {
+                    frame_type: mac::FrameType::Data,
+                    frame_pending: false,
+                    ack_request: true,
+                    pan_id_compress: true,
+                    seq_no_suppress: false,
+                    ie_present: false,
+                    version: mac::FrameVersion::Ieee802154_2003,
+                    seq: 1,
+                    destination: mac::Address::Short(self.ctx.pan_id.into(), self.ctx.addr.into()).into(),
+                    source: mac::Address::Short(self.ctx.pan_id.into(), frame.src_addr().into()).into(),
+                    auxiliary_security_header: None,
+                },
+                content: FrameContent::Data,
+                payload: zb_types::Vec::<u8, A_MAX_MAC_PAYLOAD_SIZE>::from_slice(&mac_payload[..length]).unwrap(),
+                footer: [0, 0],
+            };
+
+            self.mac.get_driver_mut().add_received_frame(mac_frame);
+        }
+
+        pub fn get_last_transmitted_frame(&self) -> Option<NwkFrame> {
+            let mut payload = self.mac.get_driver().get_last_transmitted_frame()?.payload.clone();
+            let (frame, _) = self.decrypt_frame(payload.as_mut_slice()).unwrap();
+            Some(frame)
+        }
+    }
 
     #[bon::bon]
     impl Nwk<Initialized<Joined<EndDevice>>, MockDriver, MemoryStorage> {
-
         #[builder]
         pub fn end_device(
             #[builder(default = DEFAULT_NWK_ADDR)]
@@ -923,7 +942,7 @@ pub mod tests {
                 incoming_frame_counter_set: Default::default(),
                 key,
                 network_key_type: Default::default(),
-            });
+            }).unwrap();
 
             Nwk {
                 mac,
@@ -946,6 +965,102 @@ pub mod tests {
                     route_request_counter: 0,
                     ctx: Joined {
                         ctx: EndDevice
+                    },
+                },
+            }
+        }
+    }
+
+    pub const DEFAULT_CHILD_EXT_ADDR: ExtendedAddress = ExtendedAddress(0x1235_5678_90ab_cdef);
+    pub const DEFAULT_CHILD_NWK_ADDR: NwkAddress = NwkAddress(0x1235);
+
+    fn make_default_children() -> NeighborTable {
+        NeighborTable(Vec::<NwkNeighbor, 32>::from_slice(&[
+            NwkNeighbor::new(NewNwkNeighbour {
+                ext_addr: DEFAULT_CHILD_EXT_ADDR,
+                nwk_addr: DEFAULT_CHILD_NWK_ADDR,
+                device_type: DeviceType::EndDevice,
+                rx_on_when_idle: true,
+                relationship: NeighborRelationship::Child,
+            })
+        ]).unwrap())
+    }
+
+    #[bon::bon]
+    impl Nwk<Initialized<Joined<Router>>, MockDriver, MemoryStorage> {
+        #[builder]
+        pub fn router(
+            #[builder(default = DEFAULT_NWK_ADDR)]
+            addr: NwkAddress,
+            #[builder(default = DEFAULT_EXT_ADDR)]
+            ext_addr: ExtendedAddress,
+            #[builder(default = DEFAULT_EXT_ADDR)]
+            ext_pan_id: ExtendedAddress,
+            #[builder(default = DEFAULT_NWK_PAN_ID)]
+            pan_id: PanId,
+            #[builder(default = NwkNeighbor::default())]
+            parent: NwkNeighbor,
+            #[builder(default = ParentInformation::default())]
+            parent_information: ParentInformation,
+            #[builder(default = StackProfile::ZigbeePro)]
+            profile: StackProfile,
+            #[builder(default = true)]
+            rx_on_when_idle: bool,
+            #[builder(default = Channel::Channel11)]
+            channel: Channel,
+            #[builder(default = DEFAULT_NWK_KEY)]
+            key: Key,
+            #[builder(default = 0)]
+            outgoing_frame_counter: u32,
+            children: Option<NeighborTable>,
+        ) -> Self {
+            let driver = MockDriver::builder()
+                .extended_address(ext_addr)
+                .pan_id(pan_id)
+                .short_addr(addr)
+                .rx_on_when_idle(rx_on_when_idle)
+                .channel(channel)
+                .build();
+
+            let mac = Mlme::new(driver);
+            let mut security_material_set = NetworkSecurityMaterialDescriptorSet::default();
+            security_material_set.push(NetworkSecurityMaterialDescriptor {
+                key_seq_number: 0,
+                outgoing_frame_counter,
+                incoming_frame_counter_set: Default::default(),
+                key,
+                network_key_type: Default::default(),
+            }).unwrap();
+
+            Nwk {
+                mac,
+                stg: MemoryStorage::new(),
+                rng: SmallRng::seed_from_u64(0),
+                seq_number: 0,
+                ctx: Initialized {
+                    addr,
+                    addr_map: Default::default(),
+                    ext_pan_id,
+                    group_table: Default::default(),
+                    pan_id,
+                    parent,
+                    parent_information,
+                    profile,
+                    update_id: 0,
+                    active_key_seq_number: 0,
+                    all_fresh: false,
+                    security_material_set,
+                    route_request_counter: 0,
+                    ctx: Joined {
+                        ctx: Router {
+                            broadcast_transaction_table: Default::default(),
+                            children: children.unwrap_or_else(make_default_children),
+                            concentrator_discovery_time: 0,
+                            concentrator_radius: 0,
+                            is_concentrator: false,
+                            route_record_table: Default::default(),
+                            route_table: Default::default(),
+                        }
                     },
                 },
             }

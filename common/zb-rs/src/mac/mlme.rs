@@ -569,3 +569,19 @@ fn parse_beacon(frame: MacFrame, channel: Channel) -> Option<PanDescriptor> {
         }
     }
 }
+
+#[cfg(test)]
+pub mod tests {
+    use zb_hal_test_mock::driver::MockDriver;
+    use crate::mac::mlme::Mlme;
+
+    impl Mlme<MockDriver> {
+        pub fn get_driver(&self) -> &MockDriver {
+            &self.driver
+        }
+
+        pub fn get_driver_mut(&mut self) -> &mut MockDriver {
+            &mut self.driver
+        }
+    }
+}

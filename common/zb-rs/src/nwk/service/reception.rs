@@ -1065,13 +1065,13 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<PendingRejoin>, D, S> {
 
 #[cfg(test)]
 mod tests {
-    use crate::mac::types::McpsDataIndication;
-    use crate::nwk::ctx::tests::DEFAULT_NWK_ADDR;
-    use crate::nwk::ctx::{EndDevice, Initialized, Joined, Nwk};
+    use embassy_futures::select::{select, Either};
+    use embassy_time::{Duration, Timer};
+    use crate::nwk::ctx::{EndDevice, Initialized, Joined, Nwk, NwkListen};
     use crate::nwk::frame::NwkFrame;
     use crate::nwk::frame::header::{FrameType, NwkHeader};
     use crate::nwk::nlde::{NldeDataIndicationDstAddress, NwkIndication};
-    use zb_hal_test_mock::driver::MockDriver;
+    use zb_hal_test_mock::driver::{MockDriver, DEFAULT_NWK_ADDR};
     use zb_hal_test_mock::storage::MemoryStorage;
     use zb_types::Vec;
     use zb_types::common::NwkAddress;
@@ -1082,8 +1082,15 @@ mod tests {
 
     async fn quick_indication_ed(nwk: &mut Nwk<Initialized<Joined<EndDevice>>, MockDriver, MemoryStorage>, header: NwkHeader) -> Option<NwkIndication> {
         let frame = NwkFrame::new_data_frame(header, Vec::from_iter(PAYLOAD));
-        let indication = McpsDataIndication::from_frame(nwk, frame).await;
-        let result = nwk.handle_data_indication(true, indication).await;
+        nwk.add_received_frame(&frame);
+
+        let result = match select(
+            NwkListen::listen_nwk(nwk, true),
+            Timer::after(Duration::from_millis(100)),
+        ).await {
+            Either::First(result) => Some(result),
+            Either::Second(_) => None
+        };
 
         result
     }

@@ -1,7 +1,9 @@
+use byte::TryRead;
 use crate::common::{ExtendedAddress, NwkAddress, PanId};
 use byte_derive::{TryRead, TryWrite};
 use ieee802154::mac;
 use ieee802154::mac::command::CapabilityInformation;
+use ieee802154::mac::FooterMode;
 use zb_macros::BitStruct;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -221,7 +223,7 @@ pub const A_MAX_MAC_SAFE_PAYLOAD_SIZE: usize =
 pub const A_MAX_MAC_PAYLOAD_SIZE: usize = A_MAX_PHY_PACKET_SIZE - A_MIN_MPDU_OVERHEAD;
 pub const A_MIN_MPDU_OVERHEAD: usize = 11;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MacFrame {
     pub header: mac::Header,
     pub content: mac::FrameContent,
@@ -229,6 +231,19 @@ pub struct MacFrame {
     pub payload: crate::Vec<u8, A_MAX_MAC_PAYLOAD_SIZE>,
 
     pub footer: [u8; 2],
+}
+
+impl TryRead<'_> for MacFrame {
+    fn try_read(bytes: &'_ [u8], _: ()) -> byte::Result<(Self, usize)> {
+        let (frame, size) = mac::frame::Frame::try_read(bytes, FooterMode::Explicit)?;
+        Ok((Self {
+            header: frame.header,
+            content: frame.content,
+            payload: crate::Vec::<u8, A_MAX_MAC_PAYLOAD_SIZE>::from_slice(frame.payload)
+                .map_err(|_| byte::Error::BadInput {err: "frame too long"})?,
+            footer: frame.footer
+        }, size))
+    }
 }
 
 #[derive(BitStruct, Copy, Clone, Eq, PartialEq, Debug)]
