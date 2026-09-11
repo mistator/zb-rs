@@ -27,7 +27,7 @@ pub trait LocalIeee802154Driver {
     async fn reset(&mut self, set_default_pib: bool) -> ();
 }
 
-pub trait NwkMac: Ieee802154Driver + Clone + Debug {}
+pub trait NwkMac: Ieee802154Driver {}
 
 #[derive(Clone, Copy, Debug, Error)]
 pub enum StorageError {

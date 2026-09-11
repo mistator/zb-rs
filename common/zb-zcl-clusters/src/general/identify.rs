@@ -27,7 +27,7 @@ pub enum EffectVariant {
     Default = 0x00,
 }
 
-pub trait IdentifyClusterHandler: Debug {
+pub trait IdentifyClusterHandler {
     fn identify_start(&mut self, seconds: u16);
     fn identify_stop(&mut self);
     fn identify_effect(&mut self, identifier: EffectIdentifier, _variant: EffectVariant);
