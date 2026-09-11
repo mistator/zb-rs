@@ -2,9 +2,9 @@ use embassy_time::Duration;
 
 use crate::common::security::frame::SecurityLevel;
 use crate::common::utils::from_octets;
-use crate::nwk::ctx::DeviceTimeout;
 use zb_types::common::NwkAddress;
 use zb_types::mac::A_MAX_MAC_PAYLOAD_SIZE;
+use crate::nwk::commands::end_device_timeout_request::DeviceTimeout;
 
 pub const NWK_COORDINATOR_ADDRESS: NwkAddress = NwkAddress::ZERO;
 pub const DEFAULT_SECURITY_LEVEL: SecurityLevel = SecurityLevel::EncMic32;

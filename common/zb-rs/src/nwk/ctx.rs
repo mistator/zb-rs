@@ -27,37 +27,7 @@ use zb_hal::{NwkMac, StorageError, StorageRegion};
 use zb_macros::try_write_impl;
 use zb_types::common::{DeviceType, ExtendedAddress, Key, NwkAddress, PanId};
 use zb_types::mac::{Channel, MacAddress};
-
-#[derive(TryRead, TryWrite, Clone, Copy, Debug, Default, PartialEq)]
-#[repr(u8)]
-pub enum DeviceTimeout {
-    #[default]
-    Secs10 = 0,
-    Mins2 = 1,
-    Mins4 = 2,
-    Mins8 = 3,
-    Mins16 = 4,
-    Mins32 = 5,
-    Mins64 = 6,
-    Mins128 = 7,
-    Mins256 = 8,
-    Mins512 = 9,
-    Mins1024 = 10,
-    Mins2048 = 11,
-    Mins4096 = 12,
-    Mins8192 = 13,
-    Mins16384 = 14,
-}
-
-impl DeviceTimeout {
-    pub fn get_duration(&self) -> Duration {
-        let value = *self as u8;
-        match value {
-            0 => Duration::from_secs(10),
-            _ => Duration::from_secs(2u64.pow(value as u32) * 60),
-        }
-    }
-}
+use crate::nwk::commands::end_device_timeout_request::DeviceTimeout;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, TryRead, TryWrite)]
 #[repr(u8)]
