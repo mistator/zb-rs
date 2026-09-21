@@ -29,7 +29,7 @@ pub enum StandardKeyDescriptor {
 
 #[derive(Clone, Copy, Debug, TryRead, TryWrite, PartialEq)]
 pub struct StandardNetworkKeyDescriptor {
-    pub key: [u8; 16],
+    pub key: Key,
     pub sequence_number: u8,
     pub destination_address: ExtendedAddress,
     pub source_address: ExtendedAddress,
@@ -37,14 +37,14 @@ pub struct StandardNetworkKeyDescriptor {
 
 #[derive(Clone, Copy, Debug, TryRead, TryWrite, PartialEq)]
 pub struct ApplicationLinkKeyDescriptor {
-    pub key: [u8; 16],
+    pub key: Key,
     pub partner_address: ExtendedAddress,
     pub initiation_flag: bool,
 }
 
 #[derive(Clone, Copy, Debug, TryRead, TryWrite, PartialEq)]
 pub struct TrustCenterLinkKeyDescriptor {
-    pub key: [u8; 16],
+    pub key: Key,
     pub destination_address: ExtendedAddress,
     pub source_address: ExtendedAddress,
 }
@@ -79,7 +79,7 @@ pub struct TrustCenterLinkKeyData {
 pub struct DeviceKeyPairDescriptor {
     pub device_address: ExtendedAddress,
     pub key_attributes: KeyAttribute,
-    pub link_key: [u8; 16],
+    pub link_key: Key,
     pub outgoing_frame_counter: u32,
     pub incoming_frame_counter: u32,
     pub link_key_type: LinkKeyType,

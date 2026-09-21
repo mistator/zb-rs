@@ -1,650 +1,35 @@
-use crate::apl::aps::types::ApsEndpoint;
-use crate::apl::zdp::types::descriptors::SimpleDescriptor;
-use crate::apl::zdp::types::descriptors::{NodeDescriptor, NodePowerDescriptor};
-use crate::common::information_base::{ParentInformation, RouteEntrySet};
-use crate::common::utils::from_octets;
-use crate::mac::mlme::Mlme;
-use crate::mac::types::PanDescriptor;
-use crate::nwk::constants::{MAX_BROADCAST_JITTER_OCTETS, NWK_COORDINATOR_ADDRESS, NWK_END_DEVICE_TIMEOUT_DEFAULT};
-use crate::nwk::nib::{IncomingFrameCounterDescriptor, NetworkKeyType, RouteRecord, TransactionRecord};
-use crate::nwk::nlde::{NldeTransferError, NwkIndication};
-use crate::nwk::nlme::{PermitJoiningConfig, PermitJoiningError};
-use crate::nwk::service::transmission::DataFrameConfig;
-use crate::stack_profile::{StackProfile, StackProfileParams};
-use byte::ctx::Endian;
-use byte::{BytesExt, TryRead, TryWrite};
+use alloc::sync::Arc;
+use core::marker::PhantomData;
+use core::sync::atomic::{AtomicU8, Ordering};
+use byte::BytesExt;
 use byte_derive::{TryRead, TryWrite};
-use core::fmt::Debug;
-use core::ops::{Add, Deref, DerefMut};
-use derive_more::{Deref, DerefMut};
-use embassy_time::{Duration, Instant};
-use ieee802154::mac::beacon::BeaconOrder;
-use rand::SeedableRng;
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_time::Duration;
 use rand::prelude::SmallRng;
+use rand::SeedableRng;
 use smart_default::SmartDefault;
 use thiserror::Error;
 use zb_hal::{NwkMac, StorageError, StorageRegion};
-use zb_macros::try_write_impl;
-use zb_types::common::{DeviceType, ExtendedAddress, Key, NwkAddress, PanId};
-use zb_types::mac::{Channel, MacAddress};
-use crate::nwk::commands::end_device_timeout_request::DeviceTimeout;
+use zb_types::common::{ExtendedAddress, NwkAddress, PanId};
+use zb_types::mac::MacDeviceType;
+use zb_types::transitions::{Either, TransitionError};
+use crate::apl::zdo::config::ZbCapabilities;
+use crate::common::information_base::{ParentInformation, RouteTable};
+use crate::common::utils::from_octets;
+use crate::mac::mlme::Mlme;
+use crate::nwk::commands::leave::Leave;
+use crate::nwk::constants::MAX_BROADCAST_JITTER_OCTETS;
+use crate::nwk::nib::{AddressMap, BroadcastTransactionTable, NeighborTable, NetworkSecurityMaterialDescriptorSet, NwkNeighbor, RouteRecord, RouteRecordTable};
+use crate::nwk::nlde::{NldeTransferError, NwkIndication};
+use crate::nwk::nlme::NlmeLeaveError;
+use crate::nwk::service::transmission::DataFrameConfig;
+use crate::stack_profile::{StackProfile, StackProfileParams};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, TryRead, TryWrite)]
-#[repr(u8)]
-pub enum NeighborRelationship {
-    Parent = 0,
-    Child = 1,
-    Sibling = 2,
-    #[default]
-    Other = 3,
-    PreviousChild = 4,
-    UnauthenticatedChild = 5,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct NwkNeighborJoinData {
-    pub extended_pan_id: ExtendedAddress,
-    pub pan_id: PanId,
-    pub logical_channel: Channel,
-    pub depth: u8,
-    pub beacon_order: BeaconOrder,
-    pub permit_joining: bool,
-    pub potential_parent: bool,
-}
-
-#[derive(Clone, Debug, Default, Deref, DerefMut, TryRead, TryWrite)]
-pub struct NeighborTable(zb_types::Vec<NwkNeighbor, 32>);
-
-impl FromIterator<NwkNeighbor> for NeighborTable {
-    fn from_iter<T: IntoIterator<Item = NwkNeighbor>>(iter: T) -> Self {
-        Self(zb_types::Vec::from_iter(iter))
-    }
-}
-
-impl NeighborTable {
-    pub fn cleanup(&mut self) {
-        let now = Instant::now();
-        (*self).retain(|nb| nb.expiration > now);
-    }
-
-    pub fn find_by_ext_addr(&self, addr: ExtendedAddress) -> Option<&NwkNeighbor> {
-        (*self).iter().find(|nb| nb.ext_addr == Some(addr))
-    }
-
-    pub fn find_by_ext_addr_and_type(
-        &self,
-        addr: ExtendedAddress,
-        type_: DeviceType,
-    ) -> Option<&NwkNeighbor> {
-        (*self)
-            .iter()
-            .find(|nb| nb.ext_addr == Some(addr) && type_ == nb.device_type)
-    }
-
-    pub fn find_by_ext_addr_and_type_mut(
-        &mut self,
-        addr: ExtendedAddress,
-        type_: DeviceType,
-    ) -> Option<&mut NwkNeighbor> {
-        (*self)
-            .iter_mut()
-            .find(|nb| nb.ext_addr == Some(addr) && type_ == nb.device_type)
-    }
-
-    pub fn find_by_ext_addr_mut(&mut self, addr: ExtendedAddress) -> Option<&mut NwkNeighbor> {
-        (*self).iter_mut().find(|nb| nb.ext_addr == Some(addr))
-    }
-
-    pub fn find_by_short_addr(&self, addr: NwkAddress) -> Option<&NwkNeighbor> {
-        (*self).iter().find(|nb| nb.nwk_addr == addr)
-    }
-
-    pub fn find_by_short_addr_and_device_type(
-        &self,
-        addr: NwkAddress,
-        device_type: DeviceType,
-    ) -> Option<&NwkNeighbor> {
-        (*self)
-            .iter()
-            .find(|nb| nb.nwk_addr == addr && nb.device_type == device_type)
-    }
-
-    pub fn find_by_short_addr_mut(&mut self, addr: NwkAddress) -> Option<&mut NwkNeighbor> {
-        (*self).iter_mut().find(|nb| nb.nwk_addr == addr)
-    }
-}
-
-#[derive(Clone, Debug, TryRead, TryWrite, SmartDefault)]
-pub struct NwkNeighbor {
-    pub ext_addr: Option<ExtendedAddress>,
-    pub nwk_addr: NwkAddress,
-    pub device_type: DeviceType,
-    pub end_device_configuration: u16,
-    pub device_timeout: DeviceTimeout,
-    pub relationship: NeighborRelationship,
-
-    #[byte(ignore = true)]
-    pub rx_on_when_idle: bool,
-    // unused
-    // timeout_counter: u32,
-    #[byte(ignore = true)]
-    pub transmit_failure: u8,
-    #[byte(ignore = true)]
-    pub incoming_cost: u8,
-    #[byte(ignore = true)]
-    pub outgoing_cost: u8,
-    #[default(Instant::now())]
-    #[byte(ignore = true, default = Instant::now())]
-    pub expiration: Instant,
-    // optional
-    // incoming_beacon_timestamp: u8,
-    // beacon_transmission_time: u8,
-    #[byte(ignore = true)]
-    pub keepalive_received: bool,
-    // we only support 1 MAC interface currently
-    // mac_interface_index: u8,
-    // optional
-    // mac_unicast_bytes_transmitted: u32,
-    // mac_unicast_bytes_received: u32,
-    #[byte(ignore = true)]
-    pub node_descriptor: Option<NodeDescriptor>,
-    #[byte(ignore = true)]
-    pub power_descriptor: Option<NodePowerDescriptor>,
-    #[byte(ignore = true)]
-    pub simple_descriptors: zb_types::HashMap<ApsEndpoint, SimpleDescriptor, 32>,
-    #[byte(ignore = true)]
-    pub join_data: Option<NwkNeighborJoinData>,
-}
-
-pub struct NewNwkNeighbour {
-    pub(crate) ext_addr: ExtendedAddress,
-    pub(crate) nwk_addr: NwkAddress,
-    pub(crate) device_type: DeviceType,
-    pub(crate) rx_on_when_idle: bool,
-    pub(crate) relationship: NeighborRelationship,
-}
-
-impl NwkNeighbor {
-    pub fn new(neighbor: NewNwkNeighbour) -> Self {
-        let timeout = NWK_END_DEVICE_TIMEOUT_DEFAULT;
-
-        NwkNeighbor {
-            ext_addr: Some(neighbor.ext_addr),
-            nwk_addr: neighbor.nwk_addr,
-            device_type: neighbor.device_type,
-            rx_on_when_idle: neighbor.rx_on_when_idle,
-            device_timeout: timeout,
-            relationship: neighbor.relationship,
-            expiration: Instant::now().add(timeout.get_duration()),
-            ..Default::default()
-        }
-    }
-
-    pub fn is_child(&self) -> bool {
-        self.relationship == NeighborRelationship::Child
-    }
-
-    pub fn is_parent(&self) -> bool {
-        self.relationship == NeighborRelationship::Parent
-    }
-
-    pub fn is_end_device(&self) -> bool {
-        self.device_type == DeviceType::EndDevice
-    }
-
-    pub fn is_router(&self) -> bool {
-        self.device_type == DeviceType::Router || self.device_type == DeviceType::Coordinator
-    }
-
-    pub(crate) fn update_from_pd(&mut self, pd: &PanDescriptor) {
-        if let MacAddress::Short(_, addr) = pd.coord_address {
-            self.nwk_addr = addr;
-            self.device_type = if addr == NWK_COORDINATOR_ADDRESS {
-                DeviceType::Coordinator
-            } else {
-                DeviceType::Router
-            };
-        }
-
-        self.relationship = NeighborRelationship::Parent; // beacon from parent
-        self.incoming_cost = pd.link_quality;
-    }
-}
-
-#[derive(Debug, Default, Clone, Deref, DerefMut)]
-pub struct AddressMap(heapless::index_map::FnvIndexMap<NwkAddress, ExtendedAddress, 64>);
-impl AddressMap {
-    pub fn find_ext_addr(&self, addr: &NwkAddress) -> Option<ExtendedAddress> {
-        self.0.get(addr).cloned()
-    }
-
-    pub fn find_nwk_addr(&self, addr: &ExtendedAddress) -> Option<NwkAddress> {
-        self.0.iter().find(|(_, ext)| **ext == *addr).map(|(nwk, _)| *nwk)
-    }
-
-    pub fn insert(&mut self, nwk: NwkAddress, ext: ExtendedAddress) -> () {
-        self.0.insert(nwk, ext).ok();
-    }
-}
-
-#[derive(Clone, Debug, Default, TryRead, TryWrite)]
-pub struct NetworkSecurityMaterialDescriptorSet(
-    zb_types::Vec<NetworkSecurityMaterialDescriptor, 4>,
-);
-
-impl Deref for NetworkSecurityMaterialDescriptorSet {
-    type Target = zb_types::Vec<NetworkSecurityMaterialDescriptor, 4>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for NetworkSecurityMaterialDescriptorSet {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct NetworkSecurityMaterialDescriptor {
-    pub key_seq_number: u8,
-    pub outgoing_frame_counter: u32,
-    pub incoming_frame_counter_set: zb_types::Vec<IncomingFrameCounterDescriptor, 32>,
-    pub key: Key,
-    pub network_key_type: NetworkKeyType,
-}
-
-impl<'a> TryRead<'a, Endian> for NetworkSecurityMaterialDescriptor {
-    fn try_read(bytes: &'a [u8], ctx: Endian) -> byte::Result<(Self, usize)> {
-        let offset = &mut 0;
-
-        let key_seq_number = bytes.read_with(offset, ctx)?;
-        let outgoing_frame_counter = bytes.read_with(offset, ctx)?;
-
-        byte::check_len(bytes, 16)?;
-        let key: [u8; 16] = bytes[*offset..*offset + 16].try_into().unwrap();
-        *offset += 16;
-
-        let network_key_type = bytes.read_with(offset, ctx)?;
-
-        Ok((
-            NetworkSecurityMaterialDescriptor {
-                key_seq_number,
-                outgoing_frame_counter,
-                key,
-                network_key_type,
-                ..Default::default()
-            },
-            *offset,
-        ))
-    }
-}
-
-#[try_write_impl]
-impl TryWrite<Endian> for &NetworkSecurityMaterialDescriptor {
-    fn try_write(self, bytes: &mut [u8], ctx: Endian) -> byte::Result<usize> {
-        let offset = &mut 0;
-
-        bytes.write_with(offset, self.key_seq_number, ctx)?;
-        bytes.write_with(offset, self.outgoing_frame_counter, ctx)?;
-        bytes.write_with(offset, self.key.as_slice(), ())?;
-        bytes.write_with(offset, self.network_key_type, ctx)?;
-
-        Ok(*offset)
-    }
-}
-
-pub const NWK_STORAGE_SIZE: usize = 1024;
-pub trait NwkStorage : StorageRegion {}
-
-#[derive(Error)]
-pub struct TransitionError<T, E> {
-    pub state: T,
-    pub error: E,
-}
-
-impl<T, E> TransitionError<T, E> {
-    pub fn new(state: T, error: E) -> Self {
-        Self { state, error }
-    }
-
-    pub fn err<Ok>(state: T, error: E) -> Result<Ok, Self> {
-        Err(Self { state, error })
-    }
-}
-
-pub type TransitionResult<TOld, TNew, E> = Result<TNew, TransitionError<TOld, E>>;
 pub type NwkTransitionResult<D, S, TOld, TNew, E> =
     Result<Nwk<TNew, D, S>, TransitionError<Nwk<TOld, D, S>, E>>;
 
-pub trait NwkState {}
-pub trait Unjoined : NwkState {}
-
-pub trait BaseNwk {
-    fn get_ext_addr(&self) -> ExtendedAddress;
-    fn get_seq_number(&mut self) -> u8;
-    fn get_rng(&mut self) -> &mut SmallRng;
-}
-
-pub trait NwkInitialized : BaseNwk {
-    fn get_profile(&self) -> &StackProfileParams;
-    fn get_addr(&self) -> NwkAddress;
-    fn find_nwk_addr(&self, ext_addr: &ExtendedAddress) -> Option<NwkAddress>;
-    fn find_ext_addr(&self, nwk_addr: &NwkAddress) -> Option<ExtendedAddress>;
-    fn get_ext_pan_id(&self) -> ExtendedAddress;
-}
-
-#[trait_variant::make(NwkListen: Send)]
-pub trait LocalNwkListen : NwkInitialized {
-    async fn listen_nwk(&mut self, is_authorized: bool) -> NwkIndication;
-}
-
-#[trait_variant::make(NwkTransmit: Send)]
-pub trait LocalNwkTransmit : NwkInitialized {
-    async fn transmit_data_frame(&mut self, nsdu: &[u8], config: &DataFrameConfig) -> Result<(), NldeTransferError>;
-}
-
-pub trait NwkJoined : NwkListen + NwkTransmit {
-    fn persist(&mut self) -> Result<(), StorageError>;
-    fn get_children(&self) -> Option<&NeighborTable>;
-
-    fn get_children_mut(&mut self) -> Option<&mut NeighborTable> {
-        None
-    }
-
-    fn get_broadcast_transaction_table(&mut self) -> Option<&BroadcastTransactionTable>;
-
-    fn get_addr_map(&self) -> &AddressMap;
-    fn get_addr_map_mut(&mut self) -> &mut AddressMap;
-
-    fn is_router(&self) -> bool {
-        self.get_children().is_some()
-    }
-    fn is_end_device(&self) -> bool {
-        !self.is_router()
-    }
-
-    fn permit_joining(&mut self, cfg: PermitJoiningConfig) -> Result<(), PermitJoiningError>;
-
-    fn get_security_material_set_mut(&mut self) -> &mut NetworkSecurityMaterialDescriptorSet;
-}
-
-pub trait NwkRouter : NwkJoined {}
-pub trait NwkEndDevice : NwkJoined {}
-
-pub struct Uninitialized;
-impl NwkState for Uninitialized {}
-impl Unjoined for Uninitialized {}
-
-pub trait InitializedState {}
-pub trait ED : InitializedState {}
-pub struct Initialized<T: InitializedState> {
-    pub addr: NwkAddress,
-    pub addr_map: AddressMap,
-    pub ext_pan_id: ExtendedAddress,
-    pub group_table: zb_types::Vec<NwkAddress, 64>,
-    pub pan_id: PanId,
-    pub parent: NwkNeighbor,
-    pub parent_information: ParentInformation,
-    pub profile: StackProfile,
-    pub update_id: u8,
-
-    pub active_key_seq_number: u8,
-    pub all_fresh: bool,
-    pub security_material_set: NetworkSecurityMaterialDescriptorSet,
-
-    pub route_request_counter: u8,
-
-    pub ctx: T,
-}
-impl<T: InitializedState> NwkState for Initialized<T> {}
-
-pub struct PendingRejoin {}
-impl InitializedState for PendingRejoin {}
-impl ED for PendingRejoin {}
-impl Unjoined for Initialized<PendingRejoin> {}
-
-pub trait JoinedDevice {}
-pub struct Joined<T: JoinedDevice> {
-    pub ctx: T,
-}
-impl<T: JoinedDevice> InitializedState for Joined<T> {}
-impl ED for Joined<EndDevice> {}
-
-pub struct EndDevice;
-impl JoinedDevice for EndDevice {}
-
-impl<T: ED, D: NwkMac, S: StorageRegion> NwkInitialized for Nwk<Initialized<T>, D, S> {
-    fn get_profile(&self) -> &StackProfileParams {
-        &self.ctx.get_profile()
-    }
-
-    fn get_addr(&self) -> NwkAddress {
-        self.ctx.addr
-    }
-
-    fn find_nwk_addr(&self, ext_addr: &ExtendedAddress) -> Option<NwkAddress> {
-        find_nwk_addr(&self.get_ext_addr(), &self.ctx, ext_addr)
-    }
-
-    fn find_ext_addr(&self, nwk_addr: &NwkAddress) -> Option<ExtendedAddress> {
-        find_ext_addr(&self.get_ext_addr(), &self.ctx, nwk_addr)
-    }
-
-    fn get_ext_pan_id(&self) -> ExtendedAddress {
-        self.ctx.ext_pan_id
-    }
-}
-
-impl<D: NwkMac, S: StorageRegion> NwkInitialized for Nwk<Initialized<Joined<Router>>, D, S> {
-    fn get_profile(&self) -> &StackProfileParams {
-        &self.ctx.get_profile()
-    }
-
-    fn get_addr(&self) -> NwkAddress {
-        self.ctx.addr
-    }
-
-    fn find_nwk_addr(&self, ext_addr: &ExtendedAddress) -> Option<NwkAddress> {
-        find_nwk_addr(&self.get_ext_addr(), &self.ctx, ext_addr)
-            .or(self.get_children().find_by_ext_addr(*ext_addr)?.nwk_addr.into())
-    }
-
-    fn find_ext_addr(&self, nwk_addr: &NwkAddress) -> Option<ExtendedAddress> {
-        find_ext_addr(&self.get_ext_addr(), &self.ctx, nwk_addr)
-            .or(self.get_children().find_by_short_addr(*nwk_addr)?.ext_addr.into())
-    }
-
-    fn get_ext_pan_id(&self) -> ExtendedAddress {
-        self.ctx.ext_pan_id
-    }
-}
-
-fn find_nwk_addr<T: InitializedState>(slf: &ExtendedAddress, ctx: &Initialized<T>, ext_addr: &ExtendedAddress) -> Option<NwkAddress> {
-    if *ext_addr == *slf {
-        return ctx.addr.into();
-    }
-
-    if ctx.parent.ext_addr == Some(*ext_addr) {
-        return ctx.parent.nwk_addr.into();
-    }
-
-    ctx.addr_map.find_nwk_addr(ext_addr)
-}
-
-fn find_ext_addr<T: InitializedState>(slf: &ExtendedAddress, ctx: &Initialized<T>, nwk_addr: &NwkAddress) -> Option<ExtendedAddress> {
-    if *nwk_addr == (*ctx).addr {
-        return (*slf).into();
-    }
-
-    if ctx.parent.nwk_addr == *nwk_addr {
-        return ctx.parent.ext_addr.into();
-    }
-
-    ctx.addr_map.find_ext_addr(nwk_addr)
-}
-
-pub type BroadcastTransactionTable = zb_types::Vec<TransactionRecord, 64>;
-
-#[derive(Default)]
-pub struct Router {
-    pub broadcast_transaction_table: BroadcastTransactionTable,
-    pub children: NeighborTable,
-    pub concentrator_discovery_time: u8,
-    pub concentrator_radius: u8,
-    pub is_concentrator: bool,
-    pub route_record_table: zb_types::Vec<RouteRecord, 64>,
-    pub route_table: RouteEntrySet,
-}
-
-impl JoinedDevice for Router {}
-
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
-    pub fn get_router_ctx(&self) -> &Router {
-        &self.ctx.ctx.ctx
-    }
-
-    pub fn get_router_ctx_mut(&mut self) -> &mut Router {
-        &mut self.ctx.ctx.ctx
-    }
-
-    pub fn has_routing_capacity(&self) -> bool {
-        !self.get_router_ctx().route_table.is_full()
-    }
-
-    pub fn get_children(&self) -> &NeighborTable {
-        &self.get_router_ctx().children
-    }
-
-    pub fn cleanup_route_table(&mut self) {
-        self.get_router_ctx_mut().route_table.cleanup()
-    }
-}
-
-impl<T: InitializedState> Initialized<T> {
-    pub fn get_profile(&self) -> &StackProfileParams {
-        self.profile.get_params()
-    }
-
-    pub fn get_nwk_broadcast_delivery_time(&self) -> Duration {
-        let profile = self.get_profile();
-
-        let octets = (2.0 * profile.nwk_max_depth as f64)
-            * (0.05 + (MAX_BROADCAST_JITTER_OCTETS as f64 / 2.0))
-            + (profile.nwk_passive_ack_timeout * (profile.nwk_max_broadcast_retries as u32)) as f64
-            / 1000.0;
-        from_octets(octets as u64)
-    }
-}
-
-impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S> {
-    pub fn reset(self) -> Nwk<Uninitialized, D, S> {
-        Nwk {
-            mac: self.mac,
-            stg: self.stg,
-            rng: self.rng,
-            seq_number: self.seq_number,
-            ctx: Uninitialized,
-        }
-    }
-}
-
-impl<T: InitializedState> Initialized<T> {
-    pub fn make_router(self) -> Initialized<Joined<Router>> {
-        Initialized {
-            addr: self.addr,
-            addr_map: self.addr_map,
-            ext_pan_id: self.ext_pan_id,
-            group_table: self.group_table,
-            pan_id: self.pan_id,
-            parent: self.parent,
-            parent_information: self.parent_information,
-            profile: self.profile,
-            update_id: self.update_id,
-            active_key_seq_number: self.active_key_seq_number,
-            all_fresh: self.all_fresh,
-            security_material_set: self.security_material_set,
-            route_request_counter: 0,
-            ctx: Joined {
-                ctx: Router::default(),
-            }
-        }
-    }
-}
-
-impl Initialized<PendingRejoin> {
-    pub fn make_end_device(self) -> Initialized<Joined<EndDevice>> {
-        Initialized {
-            addr: self.addr,
-            addr_map: self.addr_map,
-            ext_pan_id: self.ext_pan_id,
-            group_table: self.group_table,
-            pan_id: self.pan_id,
-            parent: self.parent,
-            parent_information: self.parent_information,
-            profile: self.profile,
-            update_id: self.update_id,
-            active_key_seq_number: self.active_key_seq_number,
-            all_fresh: self.all_fresh,
-            security_material_set: self.security_material_set,
-            route_request_counter: 0,
-            ctx: Joined {
-                ctx: EndDevice
-            }
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct Nwk<T: NwkState, D: NwkMac, S: StorageRegion> {
-    pub mac: Mlme<D>,
-    pub stg: S,
-    pub rng: SmallRng,
-
-    pub seq_number: u8,
-    pub ctx: T,
-}
-
-impl<T: NwkState, D: NwkMac, S: StorageRegion> BaseNwk for Nwk<T, D, S> {
-    fn get_ext_addr(&self) -> ExtendedAddress {
-        self.mac.get_ext_addr()
-    }
-
-    fn get_seq_number(&mut self) -> u8 {
-        self.seq_number = self.seq_number.wrapping_add(1);
-        self.seq_number
-    }
-
-    fn get_rng(&mut self) -> &mut SmallRng {
-        &mut self.rng
-    }
-}
-
-impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkRouter for Nwk<Initialized<Joined<Router>>, D, S> {}
-impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkEndDevice for Nwk<Initialized<Joined<EndDevice>>, D, S> {}
-
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<PendingRejoin>, D, S> {
-    pub fn make_end_device(self) -> Nwk<Initialized<Joined<EndDevice>>, D, S> {
-        Nwk {
-            mac: self.mac,
-            stg: self.stg,
-            rng: self.rng,
-            seq_number: self.seq_number,
-            ctx: self.ctx.make_end_device()
-        }
-    }
-
-    pub fn make_router(self) -> Nwk<Initialized<Joined<Router>>, D, S> {
-        Nwk {
-            mac: self.mac,
-            stg: self.stg,
-            rng: self.rng,
-            seq_number: self.seq_number,
-            ctx: self.ctx.make_router()
-        }
-    }
-}
+pub const NWK_STORAGE_SIZE: usize = 1024;
 
 #[derive(TryRead, TryWrite)]
 pub struct PersistentNwkContext {
@@ -660,6 +45,91 @@ pub struct PersistentNwkContext {
     neighbor_table: Option<NeighborTable>, // 32*15
 }
 
+#[derive(Clone, SmartDefault)]
+pub struct NwkContext {
+    // INITIALIZED FIELDS
+    pub addr_map: AddressMap,
+    pub group_table: GroupTable,
+    pub parent_information: ParentInformation,
+    pub profile: StackProfile,
+    pub update_id: u8,
+
+    pub active_key_seq_number: Arc<AtomicU8>,
+    pub all_fresh: bool,
+    #[default(Arc::new(Mutex::new(NetworkSecurityMaterialDescriptorSet::default())))]
+    pub security_material_set: Arc<Mutex<CriticalSectionRawMutex, NetworkSecurityMaterialDescriptorSet>>,
+
+    pub route_request_counter: u8,
+    #[default(Arc::new(Mutex::new(NeighborTable::default())))]
+    pub neighbors: Arc<Mutex<CriticalSectionRawMutex, NeighborTable>>,
+
+    // ROUTER FIELDS
+    pub broadcast_transaction_table: BroadcastTransactionTable,
+    pub concentrator_discovery_time: u8,
+    pub concentrator_radius: u8,
+    pub is_concentrator: bool,
+    pub route_record_table: zb_types::Vec<RouteRecord, 64>,
+    pub route_table: RouteTable,
+}
+
+
+pub trait NwkState {}
+pub trait InitializedState : NwkState {}
+pub trait UnjoinedState : NwkState {}
+pub trait JoinedState : InitializedState {}
+pub trait NonRoutingState: InitializedState {}
+pub trait RoutingState : JoinedState {}
+
+pub struct Uninitialized {}
+pub struct PendingJoin {}
+pub struct JoinedAsEndDevice {}
+pub struct JoinedAsRouter {}
+pub struct JoinedAsCoordinator {}
+
+impl NwkState for Uninitialized {}
+impl UnjoinedState for Uninitialized {}
+
+impl NwkState for PendingJoin {}
+impl InitializedState for PendingJoin {}
+impl UnjoinedState for PendingJoin {}
+impl NonRoutingState for PendingJoin {}
+
+impl NwkState for JoinedAsEndDevice {}
+impl InitializedState for JoinedAsEndDevice {}
+impl JoinedState for JoinedAsEndDevice {}
+impl NonRoutingState for JoinedAsEndDevice {}
+
+impl NwkState for JoinedAsRouter {}
+impl InitializedState for JoinedAsRouter {}
+impl JoinedState for JoinedAsRouter {}
+impl RoutingState for JoinedAsRouter {}
+
+impl NwkState for JoinedAsCoordinator {}
+impl InitializedState for JoinedAsCoordinator {}
+impl JoinedState for JoinedAsCoordinator {}
+impl RoutingState for JoinedAsCoordinator {}
+
+pub type GroupTable = zb_types::Vec<NwkAddress, 64>;
+
+#[derive(Clone)]
+pub struct Nwk<T: NwkState, D: NwkMac, S: StorageRegion> {
+    pub(crate) mac: Mlme<D>,
+    pub(crate) stg: S,
+    pub(crate) rng: SmallRng,
+
+    pub(crate) seq_number: Arc<AtomicU8>,
+
+    ctx: NwkContext,
+    _marker: PhantomData<T>,
+}
+
+pub struct NwkConfig<D: NwkMac, S: StorageRegion> {
+    pub mac: Mlme<D>,
+    pub stg: S,
+    pub rng: SmallRng,
+    pub seq_number: Arc<AtomicU8>,
+}
+
 #[derive(Error)]
 pub struct LoadNwkError<D: NwkMac, S: StorageRegion> {
     pub mac: Mlme<D>,
@@ -668,7 +138,18 @@ pub struct LoadNwkError<D: NwkMac, S: StorageRegion> {
 }
 
 impl<T: NwkState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
-    pub fn load(mac: Mlme<D>, mut stg: S) -> Result<Nwk<Initialized<PendingRejoin>, D, S>, LoadNwkError<D, S>> {
+    pub fn new(cfg: NwkConfig<D, S>) -> Self {
+        Nwk {
+            mac: cfg.mac,
+            stg: cfg.stg,
+            rng: cfg.rng,
+            seq_number: cfg.seq_number,
+            ctx: Default::default(),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn load(mut mac: Mlme<D>, mut stg: S) -> Result<Nwk<PendingJoin, D, S>, LoadNwkError<D, S>> {
         let mut buffer = [0u8; NWK_STORAGE_SIZE];
 
         match stg.load(&mut buffer) {
@@ -696,130 +177,373 @@ impl<T: NwkState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
             }
         };
 
+        mac.set_pan_id(persistent.pan_id.into());
+        mac.set_short_address(persistent.addr.into());
+        mac.set_extended_pan_id(persistent.ext_pan_id.into());
+
+        let neighbors = NeighborTable::new(persistent.parent);
+
         Ok(Nwk {
             mac,
             stg,
             rng: SmallRng::seed_from_u64(0), // TODO
-            seq_number: 0,
-            ctx: Initialized::<PendingRejoin> {
-                addr: persistent.addr,
+            seq_number: Arc::new(AtomicU8::new(0)),
+            ctx: NwkContext {
                 addr_map: Default::default(),
-                ext_pan_id: persistent.ext_pan_id,
                 group_table: Default::default(),
-                pan_id: persistent.pan_id,
-                parent: persistent.parent,
+                neighbors: Arc::new(Mutex::new(neighbors)),
                 parent_information: persistent.parent_information,
                 profile: persistent.profile,
                 update_id: 0,
-                active_key_seq_number: persistent.active_key_seq_number,
+                active_key_seq_number: Arc::new(AtomicU8::new(persistent.active_key_seq_number)),
                 all_fresh: persistent.all_fresh,
-                security_material_set: persistent.security_material_set,
+                security_material_set: Arc::new(Mutex::new(persistent.security_material_set)),
                 route_request_counter: 0,
-                ctx: PendingRejoin {},
+                ..Default::default()
             },
+            _marker: PhantomData,
         })
     }
-
 }
 
-impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkJoined for Nwk<Initialized<Joined<EndDevice>>, D, S> {
+pub(crate) trait BaseNwkPrivate<D: NwkMac, S: StorageRegion> {
+    fn get_mac(&self) -> &Mlme<D>;
+    fn get_mac_mut(&mut self) -> &mut Mlme<D>;
+    fn get_stg(&self) -> &S;
+    fn get_stg_mut(&mut self) -> &mut S;
+    fn get_rng(&mut self) -> &mut SmallRng;
+}
+
+pub trait BaseNwk<D: NwkMac, S: StorageRegion> : BaseNwkPrivate<D, S> {
+    fn get_ext_addr(&self) -> ExtendedAddress { self.get_mac().get_ext_addr() }
+    fn get_seq_number(&self) -> Arc<AtomicU8>;
+    fn get_next_seq_number(&self) -> u8;
+}
+
+pub trait InitializedNwk<D: NwkMac, S: StorageRegion> : BaseNwk<D, S> {
+    fn get_ctx(&self) -> &NwkContext;
+    fn get_ctx_mut(&mut self) -> &mut NwkContext;
+
+    fn get_addr(&self) -> NwkAddress { self.get_mac().get_short_address().unwrap() }
+    fn get_pan_id(&self) -> PanId { self.get_mac().get_pan_id().unwrap() }
+    fn get_ext_pan_id(&self) -> ExtendedAddress { self.get_mac().get_extended_pan_id().unwrap() }
+    fn get_profile(&self) -> &StackProfileParams { &self.get_ctx().profile.get_params() }
+    fn get_group_table(&self) -> &GroupTable { &self.get_ctx().group_table }
+    fn get_addr_map(&self) -> &AddressMap { &self.get_ctx().addr_map }
+    fn get_addr_map_mut(&mut self) -> &mut AddressMap { &mut self.get_ctx_mut().addr_map }
+
+    fn lock_parent<U>(&self, f: impl FnOnce(&NwkNeighbor) -> U) -> U {
+        self.get_ctx().neighbors.lock(|nbs| f(&nbs.parent))
+    }
+    fn lock_parent_mut<U>(&self, f: impl FnOnce(&mut NwkNeighbor) -> U) -> U {
+        unsafe { self.get_ctx().neighbors.lock_mut(|nbs| f(&mut nbs.parent)) }
+    }
+
+    fn get_neighbors(&self) -> Arc<Mutex<CriticalSectionRawMutex, NeighborTable>> { self.get_ctx().neighbors.clone() }
+    fn lock_neighbors<U>(&self, f: impl FnOnce(&NeighborTable) -> U) -> U {
+        self.get_ctx().neighbors.lock(|nbs| f(nbs))
+    }
+    fn lock_neighbors_mut<U>(&self, f: impl FnOnce(&mut NeighborTable) -> U) -> U {
+        unsafe { self.get_ctx().neighbors.lock_mut(|nbs| f(nbs)) }
+    }
+
+    fn find_nwk_addr(&self, ext_addr: ExtendedAddress) -> Option<NwkAddress> {
+        let slf = self.get_ext_addr();
+        if ext_addr == slf {
+            return self.get_addr().into();
+        }
+
+        self.get_ctx().addr_map.find_nwk_addr(&ext_addr)
+            .or(self.get_ctx().neighbors.lock(|nbs| nbs.find_by_ext_addr(ext_addr)?.nwk_addr.into()))
+    }
+
+    fn find_ext_addr(&self, nwk_addr: NwkAddress) -> Option<ExtendedAddress> {
+        if nwk_addr == self.get_addr() {
+            return self.get_ext_addr().into();
+        }
+
+        self.get_ctx().addr_map.find_ext_addr(&nwk_addr)
+            .or(self.get_ctx().neighbors.lock(|nbs| nbs.find_by_short_addr(nwk_addr)?.ext_addr.into()))
+    }
+
+    fn get_security_material_set(&self) -> Arc<Mutex<CriticalSectionRawMutex, NetworkSecurityMaterialDescriptorSet>> {
+        self.get_ctx().security_material_set.clone()
+    }
+
+    fn get_active_key_seq_number(&self) -> Arc<AtomicU8> {
+        self.get_ctx().active_key_seq_number.clone()
+    }
+
+    fn get_nwk_broadcast_delivery_time(&self) -> Duration {
+        let profile = self.get_profile();
+
+        let octets = (2.0 * profile.nwk_max_depth as f64)
+            * (0.05 + (MAX_BROADCAST_JITTER_OCTETS as f64 / 2.0))
+            + (profile.nwk_passive_ack_timeout * (profile.nwk_max_broadcast_retries as u32)) as f64
+            / 1000.0;
+        from_octets(octets as u64)
+    }
+
+    fn get_broadcast_transaction_table(&self) -> &BroadcastTransactionTable {
+        &self.get_ctx().broadcast_transaction_table
+    }
+
     fn persist(&mut self) -> Result<(), StorageError> {
-        let persistent = make_persistence_end_device(&self.ctx);
+        let persistent = PersistentNwkContext {
+            addr: self.get_addr(),
+            ext_pan_id: self.get_ext_pan_id(),
+            pan_id: self.get_pan_id(),
+            parent: self.get_ctx().neighbors.lock(|nbs| nbs.parent.clone()),
+            parent_information: self.get_ctx().parent_information,
+            profile: self.get_ctx().profile,
+            active_key_seq_number: self.get_ctx().active_key_seq_number.load(Ordering::Relaxed),
+            all_fresh: self.get_ctx().all_fresh,
+            security_material_set: self.get_ctx().security_material_set.lock(|set| set.clone()),
+            neighbor_table: self.get_ctx().neighbors.lock(|children| children.clone()).into()
+        };
 
         let mut buffer = [0u8; NWK_STORAGE_SIZE];
         buffer.write_with(&mut 0, persistent, byte::LE)?;
 
-        self.stg.persist(&buffer)
+        self.get_stg_mut().persist(&buffer)
     }
 
-    fn get_children(&self) -> Option<&NeighborTable> {
-        None
-    }
+    fn reset(self) -> Nwk<Uninitialized, D, S>;
+}
 
-    fn get_broadcast_transaction_table(&mut self) -> Option<&BroadcastTransactionTable> {
-        None
-    }
+pub trait NwkListen<D: NwkMac, S: StorageRegion> : InitializedNwk<D, S> {
+    async fn listen_nwk(&mut self, is_authorized: bool) -> NwkIndication;
+}
 
-    fn get_addr_map(&self) -> &AddressMap {
-        &self.ctx.addr_map
-    }
+pub trait NwkTransmit<D: NwkMac, S: StorageRegion> : InitializedNwk<D, S> {
+    async fn transmit_data_frame(&mut self, nsdu: &[u8], config: &DataFrameConfig) -> Result<(), NldeTransferError>;
+}
 
-    fn get_addr_map_mut(&mut self) -> &mut AddressMap {
-        &mut self.ctx.addr_map
-    }
+pub trait JoinedNwk<D: NwkMac, S: StorageRegion> : NwkListen<D, S> + NwkTransmit<D, S> {
+    //fn get_parent(&self) -> &NwkNeighbor { &self.get_ctx().parent }
+    fn to_pending_rejoin(self) -> Nwk<PendingJoin, D, S>;
+    fn is_router(&self) -> bool;
+    fn is_end_device(&self) -> bool { !self.is_router() }
+    async fn leave(&mut self, rejoin: bool) -> Result<(), NlmeLeaveError>;
+}
 
-    fn permit_joining(&mut self, _cfg: PermitJoiningConfig) -> Result<(), PermitJoiningError> {
-        Err(PermitJoiningError::InvalidRequest("permit joining is only available in routers"))
-    }
+pub trait RoutingNwk<T: RoutingState, D: NwkMac, S: StorageRegion> : JoinedNwk<D, S> {}
 
-    fn get_security_material_set_mut(&mut self) -> &mut NetworkSecurityMaterialDescriptorSet {
-        &mut self.ctx.security_material_set
+impl<T: NwkState, D: NwkMac, S: StorageRegion> BaseNwkPrivate<D, S> for Nwk<T, D, S> {
+    fn get_mac(&self) -> &Mlme<D> { &self.mac }
+    fn get_mac_mut(&mut self) -> &mut Mlme<D> { &mut self.mac }
+    fn get_stg(&self) -> &S { &self.stg }
+    fn get_stg_mut(&mut self) -> &mut S { &mut self.stg }
+    fn get_rng(&mut self) -> &mut SmallRng { &mut self.rng }
+}
+
+impl<T: NwkState, D: NwkMac, S: StorageRegion> BaseNwk<D, S> for Nwk<T, D, S> {
+    fn get_seq_number(&self) -> Arc<AtomicU8> { self.seq_number.clone() }
+    fn get_next_seq_number(&self) -> u8 { self.seq_number.fetch_add(1, Ordering::Relaxed) }
+}
+
+impl<T: InitializedState, D: NwkMac, S: StorageRegion> InitializedNwk<D, S> for Nwk<T, D, S> {
+    fn get_ctx(&self) -> &NwkContext { &self.ctx }
+    fn get_ctx_mut(&mut self) -> &mut NwkContext { &mut self.ctx }
+
+    fn reset(mut self) -> Nwk<Uninitialized, D, S>
+    where
+        Self: Sized
+    {
+        self.get_stg_mut().clear().ok();
+        self.mac.reset(true);
+
+        Nwk {
+            mac: self.mac,
+            stg: self.stg,
+            rng: self.rng,
+            seq_number: self.seq_number,
+            ctx: NwkContext::default(),
+            _marker: PhantomData
+        }
     }
 }
 
-impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkJoined for Nwk<Initialized<Joined<Router>>, D, S> {
-    fn persist(&mut self) -> Result<(), StorageError> {
-        let mut persistent = make_persistence_end_device(&self.ctx);
-        persistent.neighbor_table = Some(self.get_router_ctx().children.clone());
+fn to_pending_rejoin<T: JoinedState, D: NwkMac, S: StorageRegion>(mut nwk: Nwk<T, D, S>) -> Nwk<PendingJoin, D, S> {
+    nwk.get_ctx_mut().neighbors = Arc::new(Mutex::new(NeighborTable::new(nwk.lock_parent(|parent| parent.clone()))));
+    let seq_number = nwk.get_seq_number();
 
-        let mut buffer = [0u8; 1024];
-        buffer.write_with(&mut 0, persistent, byte::LE)?;
+    Nwk {
+        mac: nwk.mac,
+        stg: nwk.stg,
+        rng: nwk.rng,
+        ctx: nwk.ctx,
+        seq_number,
+        _marker: PhantomData,
+    }
+}
 
-        self.stg.persist(&buffer)
+impl<D: NwkMac, S: StorageRegion> JoinedNwk<D, S> for Nwk<JoinedAsEndDevice, D, S> {
+    fn to_pending_rejoin(self) -> Nwk<PendingJoin, D, S> { to_pending_rejoin(self) }
+    fn is_router(&self) -> bool { false }
+
+    async fn leave(&mut self, rejoin: bool) -> Result<(), NlmeLeaveError> {
+        self.emit_leave_cmd(Leave {
+            rejoin,
+            request: false,
+            remove_children: false,
+        }, NwkAddress::BROADCAST_RX_ON_IDLE, None).await.map_err(NlmeLeaveError::from)
+    }
+}
+
+impl<D: NwkMac, S: StorageRegion> JoinedNwk<D, S> for Nwk<JoinedAsRouter, D, S> {
+    fn to_pending_rejoin(self) -> Nwk<PendingJoin, D, S> { to_pending_rejoin(self) }
+    fn is_router(&self) -> bool { true }
+
+    async fn leave(&mut self, rejoin: bool) -> Result<(), NlmeLeaveError> {
+        self.emit_leave_cmd(Leave {
+            rejoin,
+            request: false,
+            remove_children: false,
+        }, NwkAddress::MAX, None).await.map_err(NlmeLeaveError::from)
+    }
+}
+
+impl<D: NwkMac, S: StorageRegion> JoinedNwk<D, S> for Nwk<JoinedAsCoordinator, D, S> {
+    fn to_pending_rejoin(self) -> Nwk<PendingJoin, D, S> { to_pending_rejoin(self) }
+    fn is_router(&self) -> bool { true }
+
+    async fn leave(&mut self, rejoin: bool) -> Result<(), NlmeLeaveError> {
+        self.emit_leave_cmd(Leave {
+            rejoin,
+            request: false,
+            remove_children: false,
+        }, NwkAddress::MAX, None).await.map_err(NlmeLeaveError::from)
+    }
+}
+
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
+    pub fn get_route_table(&self) -> &RouteTable { &self.ctx.route_table }
+    pub fn get_route_table_mut(&mut self) -> &mut RouteTable { &mut self.ctx.route_table }
+    pub fn get_route_record_table(&self) -> &RouteRecordTable { &self.ctx.route_record_table }
+    pub fn get_route_record_table_mut(&mut self) -> &mut RouteRecordTable { &mut self.ctx.route_record_table }
+    pub fn get_broadcast_transaction_table(&self) -> &BroadcastTransactionTable { &self.ctx.broadcast_transaction_table }
+    pub fn get_broadcast_transaction_table_mut(&mut self) -> &mut BroadcastTransactionTable { &mut self.ctx.broadcast_transaction_table }
+
+    pub fn lock_neighbors<U>(&self, f: impl FnOnce(&NeighborTable) -> U) -> U { self.ctx.neighbors.lock(f) }
+    pub fn lock_neighbors_mut<U>(&self, f: impl FnOnce(&mut NeighborTable) -> U) -> U {
+        unsafe { self.ctx.neighbors.lock_mut(f) }
     }
 
-    fn get_children(&self) -> Option<&NeighborTable> {
-        Some(&self.ctx.ctx.ctx.children)
-    }
+    pub fn has_routing_capacity(&self) -> bool { !self.ctx.route_table.is_full() }
+}
 
-    fn get_children_mut(&mut self) -> Option<&mut NeighborTable> {
-        Some(&mut self.ctx.ctx.ctx.children)
-    }
+impl<D: NwkMac, S: StorageRegion> Nwk<Uninitialized, D, S> {
+    pub fn to_joined(self, parent: NwkNeighbor, stack_profile: StackProfile, capability_information: ZbCapabilities) -> Either<Nwk<JoinedAsEndDevice, D, S>, Nwk<JoinedAsRouter, D, S>> {
+        let ctx = NwkContext {
+            neighbors: Arc::new(Mutex::new(NeighborTable::new(parent))),
+            profile: stack_profile,
+            ..Default::default()
+        };
 
-    fn get_broadcast_transaction_table(&mut self) -> Option<&BroadcastTransactionTable> {
-        Some(&self.ctx.ctx.ctx.broadcast_transaction_table)
+        match capability_information.device_type {
+            MacDeviceType::ReducedFunctionDevice => {
+                Either::First(Nwk::<JoinedAsEndDevice, D, S> {
+                    mac: self.mac,
+                    stg: self.stg,
+                    rng: self.rng,
+                    seq_number: self.seq_number,
+                    ctx,
+                    _marker: PhantomData,
+                })
+            }
+            MacDeviceType::FullFunctionDevice => {
+                Either::Second(Nwk::<JoinedAsRouter, D, S> {
+                    mac: self.mac,
+                    stg: self.stg,
+                    rng: self.rng,
+                    seq_number: self.seq_number,
+                    ctx,
+                    _marker: PhantomData,
+                })
+            }
+        }
     }
+}
 
-    fn get_addr_map(&self) -> &AddressMap {
-        &self.ctx.addr_map
+impl<D: NwkMac, S: StorageRegion> Nwk<PendingJoin, D, S> {
+    pub fn to_router(self) -> Nwk<JoinedAsRouter, D, S> {
+        Nwk::<JoinedAsRouter, D, S> {
+            mac: self.mac,
+            stg: self.stg,
+            rng: self.rng,
+            seq_number: self.seq_number,
+            ctx: self.ctx,
+            _marker: PhantomData,
+        }
     }
+    pub fn to_joined(mut self, parent: NwkNeighbor, capability_information: ZbCapabilities) -> Either<Nwk<JoinedAsEndDevice, D, S>, Nwk<JoinedAsRouter, D, S>> {
+        self.ctx.neighbors = Arc::new(Mutex::new(NeighborTable::new(parent)));
 
-    fn get_addr_map_mut(&mut self) -> &mut AddressMap {
-        &mut self.ctx.addr_map
+        match capability_information.device_type {
+            MacDeviceType::ReducedFunctionDevice => {
+                Either::First(Nwk::<JoinedAsEndDevice, D, S> {
+                    mac: self.mac,
+                    stg: self.stg,
+                    rng: self.rng,
+                    seq_number: self.seq_number,
+                    ctx: self.ctx,
+                    _marker: PhantomData,
+                })
+            }
+            MacDeviceType::FullFunctionDevice => {
+                Either::Second(Nwk::<JoinedAsRouter, D, S> {
+                    mac: self.mac,
+                    stg: self.stg,
+                    rng: self.rng,
+                    seq_number: self.seq_number,
+                    ctx: self.ctx,
+                    _marker: PhantomData,
+                })
+            }
+        }
     }
+}
 
-    fn permit_joining(&mut self, cfg: PermitJoiningConfig) -> Result<(), PermitJoiningError> {
-        Ok(self.permit_joining(cfg))
-    }
-
-    fn get_security_material_set_mut(&mut self) -> &mut NetworkSecurityMaterialDescriptorSet {
-        &mut self.ctx.security_material_set
+impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
+    pub fn to_router(self) -> Nwk<JoinedAsRouter, D, S> {
+        Nwk {
+            mac: self.mac,
+            stg: self.stg,
+            rng: self.rng,
+            seq_number: self.seq_number,
+            ctx: self.ctx,
+            _marker: PhantomData,
+        }
     }
 }
 
 
-fn make_persistence_end_device<T: JoinedDevice>(ctx: &Initialized<Joined<T>>) -> PersistentNwkContext {
-    PersistentNwkContext {
-        addr: ctx.addr,
-        ext_pan_id: ctx.ext_pan_id,
-        pan_id: ctx.pan_id,
-        parent: ctx.parent.clone(),
-        parent_information: ctx.parent_information,
-        profile: ctx.profile,
-        active_key_seq_number: ctx.active_key_seq_number,
-        all_fresh: ctx.all_fresh,
-        security_material_set: ctx.security_material_set.clone(),
-        neighbor_table: None
-    }
+
+mod private {
+    use crate::nwk::ctx::{JoinedAsCoordinator, JoinedAsEndDevice, JoinedAsRouter, PendingJoin, Uninitialized};
+
+    pub trait Sealed {}
+
+    impl Sealed for Uninitialized {}
+    impl Sealed for PendingJoin {}
+    impl Sealed for JoinedAsEndDevice {}
+    impl Sealed for JoinedAsRouter {}
+    impl Sealed for JoinedAsCoordinator {}
 }
+
 
 #[cfg(test)]
 pub mod tests {
+    use alloc::sync::Arc;
+    use core::marker::PhantomData;
+    use embassy_sync::blocking_mutex::Mutex;
+    use core::sync::atomic::AtomicU8;
     use ieee802154::mac;
     use ieee802154::mac::{FrameContent, Header};
     use crate::common::information_base::ParentInformation;
     use crate::mac::mlme::Mlme;
-    use crate::nwk::ctx::{EndDevice, Initialized, Joined, JoinedDevice, NeighborRelationship, NeighborTable, NetworkSecurityMaterialDescriptor, NetworkSecurityMaterialDescriptorSet, NewNwkNeighbour, Nwk, NwkListen, NwkNeighbor, Router};
+    use crate::nwk::ctx::{InitializedNwk, JoinedAsEndDevice, JoinedAsRouter, JoinedState, NeighborTable, NetworkSecurityMaterialDescriptorSet, Nwk, NwkContext, NwkNeighbor};
     use crate::stack_profile::StackProfile;
     use rand::SeedableRng;
     use rand::rngs::SmallRng;
@@ -829,13 +553,14 @@ pub mod tests {
     use zb_types::mac::{Channel, A_MAX_MAC_PAYLOAD_SIZE, MacFrame};
     use zb_types::Vec;
     use crate::nwk::frame::NwkFrame;
+    use crate::nwk::nib::{NeighborRelationship, NewNwkNeighbour, NEIGHBOR_TABLE_MAX_ENTRIES, NetworkSecurityMaterialDescriptor};
 
-    const DEFAULT_NWK_KEY: Key = [
+    const DEFAULT_NWK_KEY: Key = Key::new([
         0x01, 0x03, 0x05, 0x07, 0x09, 0x0b, 0x0d, 0x0f,
         0x00, 0x02, 0x04, 0x06, 0x08, 0x0a, 0x0c, 0x0d
-    ];
+    ]);
 
-    impl<T: JoinedDevice> Nwk<Initialized<Joined<T>>, MockDriver, MemoryStorage> {
+    impl<T: JoinedState> Nwk<T, MockDriver, MemoryStorage> {
         pub fn add_received_frame(&mut self, frame: &NwkFrame) -> () {
             let mut mac_payload = [0u8; A_MAX_MAC_PAYLOAD_SIZE];
             let length = self.build_mac_payload(frame, &mut mac_payload).unwrap();
@@ -850,8 +575,8 @@ pub mod tests {
                     ie_present: false,
                     version: mac::FrameVersion::Ieee802154_2003,
                     seq: 1,
-                    destination: mac::Address::Short(self.ctx.pan_id.into(), self.ctx.addr.into()).into(),
-                    source: mac::Address::Short(self.ctx.pan_id.into(), frame.src_addr().into()).into(),
+                    destination: mac::Address::Short(self.get_pan_id().into(), self.get_addr().into()).into(),
+                    source: mac::Address::Short(self.get_pan_id().into(), frame.src_addr().into()).into(),
                     auxiliary_security_header: None,
                 },
                 content: FrameContent::Data,
@@ -869,20 +594,30 @@ pub mod tests {
         }
     }
 
+    pub const DEFAULT_PARENT_EXT_ADDR: ExtendedAddress = ExtendedAddress(0x1233_5678_90ab_cdef);
+    pub const DEFAULT_PARENT_NWK_ADDR: NwkAddress = NwkAddress(0x1233);
+
+    pub fn make_default_parent() -> NwkNeighbor {
+        NwkNeighbor::new(NewNwkNeighbour {
+            ext_addr: DEFAULT_PARENT_EXT_ADDR,
+            nwk_addr: DEFAULT_PARENT_NWK_ADDR,
+            device_type: DeviceType::Router,
+            rx_on_when_idle: true,
+            relationship: NeighborRelationship::Parent
+        })
+    }
+
     #[bon::bon]
-    impl Nwk<Initialized<Joined<EndDevice>>, MockDriver, MemoryStorage> {
+    impl Nwk<JoinedAsEndDevice, MockDriver, MemoryStorage> {
         #[builder]
         pub fn end_device(
             #[builder(default = DEFAULT_NWK_ADDR)]
             addr: NwkAddress,
             #[builder(default = DEFAULT_EXT_ADDR)]
             ext_addr: ExtendedAddress,
-            #[builder(default = DEFAULT_EXT_ADDR)]
-            ext_pan_id: ExtendedAddress,
             #[builder(default = DEFAULT_NWK_PAN_ID)]
             pan_id: PanId,
-            #[builder(default = NwkNeighbor::default())]
-            parent: NwkNeighbor,
+            parent: Option<NwkNeighbor>,
             #[builder(default = ParentInformation::default())]
             parent_information: ParentInformation,
             #[builder(default = StackProfile::ZigbeePro)]
@@ -915,27 +650,23 @@ pub mod tests {
             }).unwrap();
 
             Nwk {
+                _marker: PhantomData,
                 mac,
                 stg: MemoryStorage::new(),
                 rng: SmallRng::seed_from_u64(0),
-                seq_number: 0,
-                ctx: Initialized {
-                    addr,
+                seq_number: Arc::new(AtomicU8::new(0)),
+                ctx: NwkContext {
                     addr_map: Default::default(),
-                    ext_pan_id,
                     group_table: Default::default(),
-                    pan_id,
-                    parent,
+                    neighbors: Arc::new(Mutex::new(NeighborTable::new(parent.unwrap_or_else(make_default_parent)))),
                     parent_information,
                     profile,
                     update_id: 0,
-                    active_key_seq_number: 0,
+                    active_key_seq_number: Arc::new(AtomicU8::new(0)),
                     all_fresh: false,
-                    security_material_set,
+                    security_material_set: Arc::new(Mutex::new(security_material_set)),
                     route_request_counter: 0,
-                    ctx: Joined {
-                        ctx: EndDevice
-                    },
+                    ..Default::default()
                 },
             }
         }
@@ -944,8 +675,8 @@ pub mod tests {
     pub const DEFAULT_CHILD_EXT_ADDR: ExtendedAddress = ExtendedAddress(0x1235_5678_90ab_cdef);
     pub const DEFAULT_CHILD_NWK_ADDR: NwkAddress = NwkAddress(0x1235);
 
-    fn make_default_children() -> NeighborTable {
-        NeighborTable(Vec::<NwkNeighbor, 32>::from_slice(&[
+    fn make_default_children() -> Vec<NwkNeighbor, NEIGHBOR_TABLE_MAX_ENTRIES> {
+        Vec::from_slice(&[
             NwkNeighbor::new(NewNwkNeighbour {
                 ext_addr: DEFAULT_CHILD_EXT_ADDR,
                 nwk_addr: DEFAULT_CHILD_NWK_ADDR,
@@ -953,23 +684,20 @@ pub mod tests {
                 rx_on_when_idle: true,
                 relationship: NeighborRelationship::Child,
             })
-        ]).unwrap())
+        ]).unwrap()
     }
 
     #[bon::bon]
-    impl Nwk<Initialized<Joined<Router>>, MockDriver, MemoryStorage> {
+    impl Nwk<JoinedAsRouter, MockDriver, MemoryStorage> {
         #[builder]
         pub fn router(
             #[builder(default = DEFAULT_NWK_ADDR)]
             addr: NwkAddress,
             #[builder(default = DEFAULT_EXT_ADDR)]
             ext_addr: ExtendedAddress,
-            #[builder(default = DEFAULT_EXT_ADDR)]
-            ext_pan_id: ExtendedAddress,
             #[builder(default = DEFAULT_NWK_PAN_ID)]
             pan_id: PanId,
-            #[builder(default = NwkNeighbor::default())]
-            parent: NwkNeighbor,
+            parent: Option<NwkNeighbor>,
             #[builder(default = ParentInformation::default())]
             parent_information: ParentInformation,
             #[builder(default = StackProfile::ZigbeePro)]
@@ -982,7 +710,7 @@ pub mod tests {
             key: Key,
             #[builder(default = 0)]
             outgoing_frame_counter: u32,
-            children: Option<NeighborTable>,
+            children: Option<Vec<NwkNeighbor, NEIGHBOR_TABLE_MAX_ENTRIES>>,
         ) -> Self {
             let driver = MockDriver::builder()
                 .extended_address(ext_addr)
@@ -1002,36 +730,36 @@ pub mod tests {
                 network_key_type: Default::default(),
             }).unwrap();
 
+            let mut table = NeighborTable::new(parent.unwrap_or_else(make_default_parent));
+            let children = children.unwrap_or_else(make_default_children);
+
+            for child in children {
+                table.children.push(child).unwrap();
+            }
+
             Nwk {
+                _marker: PhantomData,
                 mac,
                 stg: MemoryStorage::new(),
                 rng: SmallRng::seed_from_u64(0),
-                seq_number: 0,
-                ctx: Initialized {
-                    addr,
+                seq_number: Arc::new(AtomicU8::new(0)),
+                ctx: NwkContext {
                     addr_map: Default::default(),
-                    ext_pan_id,
                     group_table: Default::default(),
-                    pan_id,
-                    parent,
                     parent_information,
                     profile,
                     update_id: 0,
-                    active_key_seq_number: 0,
+                    active_key_seq_number: Arc::new(AtomicU8::new(0)),
                     all_fresh: false,
-                    security_material_set,
+                    security_material_set: Arc::new(Mutex::new(security_material_set)),
                     route_request_counter: 0,
-                    ctx: Joined {
-                        ctx: Router {
-                            broadcast_transaction_table: Default::default(),
-                            children: children.unwrap_or_else(make_default_children),
-                            concentrator_discovery_time: 0,
-                            concentrator_radius: 0,
-                            is_concentrator: false,
-                            route_record_table: Default::default(),
-                            route_table: Default::default(),
-                        }
-                    },
+                    broadcast_transaction_table: Default::default(),
+                    neighbors: Arc::new(Mutex::new(table)),
+                    concentrator_discovery_time: 0,
+                    concentrator_radius: 0,
+                    is_concentrator: false,
+                    route_record_table: Default::default(),
+                    route_table: Default::default(),
                 },
             }
         }

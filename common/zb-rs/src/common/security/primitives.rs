@@ -136,13 +136,13 @@ impl HmacAes128Mmo {
     /// Convenience method to compute HMAC in one step
     /// $\text{HMAC}(K, M) = H((K \oplus \text{opad}) || H((K \oplus
     /// \text{ipad}) || M))$
-    pub fn hmac(key: &[u8], data: &[u8]) -> Result<[u8; Aes128Mmo::BLOCK_SIZE], SecurityError> {
+    pub fn hmac(key: &[u8], data: &[u8]) -> Result<Key, SecurityError> {
         if key.len() == Aes128Mmo::BLOCK_SIZE {
-            return Self::hmac_impl(key, data);
+            return Self::hmac_impl(key, data).map(Key::new);
         }
 
         let key = Aes128Mmo::digest(key)?;
-        Self::hmac_impl(&key, data)
+        Self::hmac_impl(&key, data).map(Key::new)
     }
 
     fn hmac_impl(key: &[u8], data: &[u8]) -> Result<[u8; Aes128Mmo::BLOCK_SIZE], SecurityError> {
@@ -166,7 +166,7 @@ type Aes128Ctr = Ctr32BE<Aes128>;
 pub type Aes128Ccm<N> = Ccm<Aes128, N, U13>;
 
 pub(crate) struct CcmZigbee {
-    pub key: [u8; 16],
+    pub key: Key,
 }
 
 impl CcmZigbee {
@@ -188,7 +188,7 @@ impl CcmZigbee {
         let nonce: GenericArray<u8, U13> = GenericArray::clone_from_slice(nonce.as_slice());
 
         let tag: GenericArray<u8, T> = GenericArray::clone_from_slice(tag);
-        let cipher = Aes128Ccm::<T>::new(&self.key.into());
+        let cipher = Aes128Ccm::<T>::new(self.key.as_array().into());
         cipher
             .decrypt_in_place_detached(&nonce, aad, ciphertext, &tag)
             .map_err(|err| {
@@ -208,7 +208,7 @@ impl CcmZigbee {
         let buffer_len = buffer.len();
         let tag_len = T::to_usize();
 
-        let cipher = Aes128Ccm::<T>::new(&self.key.into());
+        let cipher = Aes128Ccm::<T>::new((*&self.key).as_array().into());
         let tag = cipher
             .encrypt_in_place_detached(&nonce, aad, &mut buffer[..buffer_len - tag_len])
             .map_err(|err| {
@@ -228,7 +228,7 @@ impl CcmZigbee {
     ) -> Result<(), SecurityError> {
         if tag.is_empty() {
             let long_nonce = self.extend_nonce(nonce);
-            let mut cipher = Aes128Ctr::new(&self.key.into(), &long_nonce.into());
+            let mut cipher = Aes128Ctr::new(self.key.as_array().into(), &long_nonce.into());
             cipher.seek(16); // AES128 block size
             cipher.apply_keystream(ciphertext);
             Ok(())
@@ -257,7 +257,7 @@ impl CcmZigbee {
         match mic_length {
             0 => {
                 let long_nonce = self.extend_nonce(nonce);
-                let mut cipher = Aes128Ctr::new(&self.key.into(), &long_nonce.into());
+                let mut cipher = Aes128Ctr::new(self.key.as_array().into(), &long_nonce.into());
                 cipher.seek(16);
                 cipher.apply_keystream(buffer);
                 Ok(())
@@ -302,9 +302,7 @@ pub fn write_and_encrypt_in_place(
     // let (payload, _) = payload.split_at_mut(tag_offset - payload_offset);
     let len = tag_offset + mic_len;
 
-    let ccm = CcmZigbee {
-        key: *key.as_array().unwrap(),
-    };
+    let ccm = CcmZigbee { key };
     ccm.encrypt_in_place(
         security_level,
         aad,
@@ -321,14 +319,13 @@ pub fn write_and_encrypt_in_place(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::security::TRUST_CENTER_LINK_KEY;
 
     #[test]
     fn ccm_primitives_mic_8() {
-        let key: [u8; 16] = [
+        let key = Key::new([
             0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
             0xce, 0xcf,
-        ];
+        ]);
         let nonce: [u8; 13] = [
             0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x03, 0x02, 0x01, 0x00, 0x06,
         ];
@@ -353,10 +350,10 @@ mod tests {
 
     #[test]
     fn ccm_primitives_no_mic() {
-        let key: [u8; 16] = [
+        let key = Key::new([
             0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
             0xce, 0xcf,
-        ];
+        ]);
         let nonce: [u8; 13] = [
             0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x03, 0x02, 0x01, 0x00, 0x06,
         ];
@@ -422,7 +419,7 @@ mod tests {
 
         let result = HmacAes128Mmo::hmac(&key, &message).unwrap();
 
-        assert_eq!(result, want);
+        assert_eq!(result, Key::new(want));
     }
 
     #[test]
@@ -443,27 +440,6 @@ mod tests {
 
         let result = HmacAes128Mmo::hmac(&key, &message).unwrap();
 
-        assert_eq!(result, want);
-    }
-
-    #[test]
-    fn cmc_mac() {
-        let key = [
-            0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
-            0xce, 0xcf,
-        ];
-        let nonce = [
-            0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x03, 0x02, 0x01, 0x00, 0x06,
-        ];
-        let mut plaintext = [
-            0x08u8, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
-            0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-        ];
-        let auth_data = [0x0, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
-
-        let cipher = Aes128Ccm::<U8>::new(&key.into());
-        let nonce: GenericArray<u8, U13> = GenericArray::clone_from_slice(nonce.as_slice());
-
-        let tag = cipher.encrypt_in_place_detached(&nonce, &auth_data, &mut plaintext);
+        assert_eq!(result, Key::new(want));
     }
 }

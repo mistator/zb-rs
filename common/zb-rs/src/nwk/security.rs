@@ -1,56 +1,64 @@
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU8, Ordering};
 use byte::BytesExt;
 use byte::TryRead;
 
 use crate::common::security::SecurityError;
-use crate::common::security::frame::AuxFrameHeader;
+use crate::common::security::frame::{AuxFrameHeader, SecurityLevel};
 use crate::common::security::frame::KeyIdentifier;
 use crate::common::security::frame::SecurityControl;
 use crate::common::security::primitives::CcmZigbee;
 use crate::common::security::primitives::write_and_encrypt_in_place;
-use crate::nwk::ctx::BaseNwk;
-use crate::nwk::ctx::{Initialized, InitializedState, Nwk};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use zb_hal::{NwkMac, StorageRegion};
+use zb_types::common::{ExtendedAddress, Key};
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use crate::nwk::ctx::{BaseNwk, InitializedNwk, InitializedState, Nwk};
+use crate::nwk::nib::NetworkSecurityMaterialDescriptorSet;
 
-impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S> {
-    pub fn encrypt_frame(
-        &mut self,
-        frame: &NwkFrame,
-        buffer: &mut [u8],
-    ) -> Result<usize, SecurityError> {
-        let ieee_addr = self.get_ext_addr();
-        let active_key_seq_number = self.ctx.active_key_seq_number;
-        let security_level = self.ctx.get_profile().nwk_security_level;
+pub struct EncryptedFrameParams {
+    pub ext_addr: ExtendedAddress,
+    pub security_level: SecurityLevel,
+    pub active_key_seq_number: Arc<AtomicU8>,
+    pub keys: Arc<Mutex<CriticalSectionRawMutex, NetworkSecurityMaterialDescriptorSet>>
+}
 
-        // 1. obtain key material & key data
-        let sec_material = self
-            .ctx
-            .security_material_set
+pub fn make_encrypted_frame(
+    frame: &NwkFrame,
+    buffer: &mut [u8],
+    params: &EncryptedFrameParams,
+) -> Result<usize, SecurityError> {
+    // 1. obtain key material & key data
+    // 2. Construct the auxiliary header
+    let security_control = SecurityControl {
+        security_level: params.security_level,
+        key_identifier: KeyIdentifier::Network,
+        extended_nonce: true,
+    };
+
+    let mut should_persist = false;
+    let result = unsafe { params.keys.lock_mut(|keys| {
+        let sec_material = keys
             .iter_mut()
-            .find(|k| k.key_seq_number == active_key_seq_number)
+            .find(|k| k.key_seq_number == params.active_key_seq_number.load(Ordering::Relaxed))
             .ok_or(SecurityError::KeyNotFound)?;
+
         if sec_material.outgoing_frame_counter == u32::MAX {
             return Err(SecurityError::InvalidData);
         }
-
-        // 2. Construct the auxiliary header
-        let security_control = SecurityControl {
-            security_level,
-            key_identifier: KeyIdentifier::Network,
-            extended_nonce: true,
-        };
 
         let aux_hdr = AuxFrameHeader {
             security_control,
             frame_counter: sec_material.outgoing_frame_counter,
             key_sequence_number: Some(sec_material.key_seq_number),
-            source_address: Some(ieee_addr),
+            source_address: Some(params.ext_addr),
         };
 
         let result = match frame {
             NwkFrame::Data(frame) => write_and_encrypt_in_place(
-                security_level,
+                params.security_level,
                 buffer,
                 aux_hdr,
                 sec_material.key,
@@ -58,7 +66,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
                 frame.payload.as_slice(),
             ),
             NwkFrame::NwkCommand(frame) => write_and_encrypt_in_place(
-                security_level,
+                params.security_level,
                 buffer,
                 aux_hdr,
                 sec_material.key,
@@ -72,15 +80,34 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
 
         if result.is_ok() {
             sec_material.outgoing_frame_counter += 1;
-            let should_persist = (sec_material.outgoing_frame_counter - 1) % 1024 == 0;
-            if should_persist {
-                //ctx.persist().await.ok();
-                // TODO
-            }
+            should_persist = (sec_material.outgoing_frame_counter - 1) % 1024 == 0;
         }
 
         result
+    })? };
+
+    if should_persist {
+        //ctx.persist().await.ok();
+        // TODO
     }
+
+    Ok(result)
+}
+
+impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
+    pub fn encrypt_frame(
+        &mut self,
+        frame: &NwkFrame,
+        buffer: &mut [u8],
+    ) -> Result<usize, SecurityError> {
+         make_encrypted_frame(frame, buffer, &EncryptedFrameParams {
+            ext_addr: self.get_ext_addr(),
+            security_level: self.get_profile().nwk_security_level,
+            active_key_seq_number: self.get_active_key_seq_number().clone(),
+            keys: self.get_security_material_set().clone()
+        })
+    }
+
 
     pub fn decrypt_frame(
         &self,
@@ -96,7 +123,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
 
         // Sec 4.3.1.2: overwrite the security level with the value from the NIB
         // (default 0x05)
-        let sec_level = self.ctx.get_profile().nwk_security_level;
+        let sec_level = self.get_profile().nwk_security_level;
         let mic_length = sec_level.mic_length();
         byte::check_len(frame_buffer, mic_length)?;
 
@@ -109,15 +136,18 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
 
         // 2) select the key from NIB
         let sec_material = self
-            .ctx
-            .security_material_set
-            .iter()
-            .find(|k| {
-                aux_hdr
-                    .key_sequence_number
-                    .is_some_and(|ksn| ksn == k.key_seq_number)
-            })
-            .ok_or(SecurityError::Unspecified)?;
+            .get_security_material_set()
+            .lock(|items| {
+                items
+                    .iter()
+                    .find(|k| {
+                        aux_hdr
+                            .key_sequence_number
+                            .is_some_and(|ksn| ksn == k.key_seq_number)
+                    })
+                    .ok_or(SecurityError::Unspecified)
+                    .cloned()
+            })?;
 
         // 3) check if frame_counter is equal or greater of the NIB
         let Some(source_address) = aux_hdr.source_address else {

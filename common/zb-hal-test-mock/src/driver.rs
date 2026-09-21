@@ -12,7 +12,7 @@ pub const DEFAULT_NWK_ADDR: NwkAddress = NwkAddress(0x1234);
 pub const DEFAULT_NWK_PAN_ID: PanId = PanId(0x1234);
 pub const DEFAULT_CHANNEL: Channel = Channel::Channel11;
 
-#[derive(Builder)]
+#[derive(Clone, Builder)]
 pub struct MockDriver {
     #[builder(default = DEFAULT_EXT_ADDR)]
     extended_address: ExtendedAddress,
@@ -40,15 +40,17 @@ impl Ieee802154Driver for MockDriver {
 
     fn get_pan_id(&self) -> Option<PanId> { self.pan_id }
 
-    async fn set_pan_id(&mut self, pan_id: Option<PanId>) -> () { self.pan_id = pan_id; }
+    fn set_pan_id(&mut self, pan_id: Option<PanId>) -> () { self.pan_id = pan_id; }
 
     fn get_short_address(&self) -> Option<NwkAddress> { self.short_addr }
 
-    async fn set_short_address(&mut self, short_addr: Option<NwkAddress>) -> () {
+    fn set_short_address(&mut self, short_addr: Option<NwkAddress>) -> () {
         self.short_addr = short_addr;
     }
 
-    async fn set_channel(&mut self, channel: Channel) -> () { self.channel = channel; }
+    fn get_channel(&self) -> Channel { self.channel }
+
+    fn set_channel(&mut self, channel: Channel) -> () { self.channel = channel; }
 
     async fn transmit(&mut self, buffer: &[u8]) -> Result<(), byte::Error> {
         let (frame, _) = MacFrame::try_read(buffer, ())?;
@@ -56,11 +58,11 @@ impl Ieee802154Driver for MockDriver {
         Ok(())
     }
 
-    async fn flush(&mut self) -> () {
+    fn flush(&mut self) -> () {
         self.received_queue.clear()
     }
 
-    async fn poll(&mut self) -> Option<MacFrame> {
+    fn poll(&mut self) -> Option<MacFrame> {
         self.received_queue.pop_front()
     }
 
@@ -73,7 +75,7 @@ impl Ieee802154Driver for MockDriver {
         panic!("no frame");
     }
 
-    async fn reset(&mut self, set_default_pib: bool) -> () {
+    fn reset(&mut self, set_default_pib: bool) -> () {
         if set_default_pib {
             self.pan_id = None;
             self.short_addr = None;

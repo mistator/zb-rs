@@ -4,10 +4,10 @@ use byte::check_len;
 use byte_derive::TryRead;
 use byte_derive::TryWrite;
 
-use crate::nwk::ctx::NeighborRelationship;
 use zb_types::common::DeviceType;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::nwk::nib::NeighborRelationship;
 
 pub struct MgmtLqiReq {
     start_index: u8,

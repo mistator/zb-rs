@@ -3,8 +3,6 @@ use crate::common::information_base::RouteEntryKey;
 use crate::common::security::SecurityError;
 use crate::nwk::constants::MAX_BROADCAST_JITTER;
 use crate::nwk::constants::NWK_MAX_SOURCE_ROUTE;
-use crate::nwk::ctx::{BaseNwk, Initialized, InitializedState, Joined, Nwk, NwkTransmit, Router};
-use crate::nwk::ctx::{ED};
 use crate::nwk::frame::header::MulticastMode;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::frame::header::{DiscoverRoute, FrameType};
@@ -20,6 +18,8 @@ use rand::RngExt;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::NwkAddress;
 use zb_types::mac::A_MAX_MAC_PAYLOAD_SIZE;
+use crate::nwk::ctx::{BaseNwk, BaseNwkPrivate, InitializedNwk, InitializedState, JoinedAsEndDevice, JoinedNwk, NonRoutingState, Nwk, NwkTransmit, RoutingState};
+use crate::nwk::security::{make_encrypted_frame, EncryptedFrameParams};
 
 #[derive(Default)]
 pub struct DataFrameConfig {
@@ -30,15 +30,15 @@ pub struct DataFrameConfig {
     pub security_disable: bool,
 }
 
-impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkTransmit for Nwk<Initialized<Joined<Router>>, D, S> {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> NwkTransmit<D, S> for Nwk<T, D, S> {
     async fn transmit_data_frame(
         &mut self,
         nsdu: &[u8],
         config: &DataFrameConfig,
     ) -> Result<(), NldeTransferError> {
-        let nwk_addr = self.ctx.addr;
+        let nwk_addr = self.get_addr();
         let (src, seq) = match &config.alias {
-            None => (nwk_addr, self.get_seq_number()),
+            None => (nwk_addr, self.get_next_seq_number()),
             Some(alias) => (alias.src_addr, alias.seq_number),
         };
 
@@ -52,7 +52,7 @@ impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkTransmit for Nw
             .maybe_radius(config.radius)
             .build();
 
-        let parent_addr = self.ctx.parent.nwk_addr;
+        let parent_addr = self.lock_parent(|parent| parent.nwk_addr);
         let payload = zb_types::Vec::from_slice(nsdu)
             .map_err(|_| NldeTransferError::InvalidRequest("frame too long"))?;
         let frame = NwkFrame::new_data_frame(header, payload);
@@ -61,15 +61,15 @@ impl<D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkTransmit for Nw
     }
 }
 
-impl<T: ED + Sync + Send, D: NwkMac + Sync + Send, S: StorageRegion + Sync + Send> NwkTransmit for Nwk<Initialized<T>, D, S> {
+impl<D: NwkMac, S: StorageRegion> NwkTransmit<D, S> for Nwk<JoinedAsEndDevice, D, S> {
     async fn transmit_data_frame(
         &mut self,
         nsdu: &[u8],
         config: &DataFrameConfig,
     ) -> Result<(), NldeTransferError> {
-        let nwk_addr = self.ctx.addr;
+        let nwk_addr = self.get_addr();
         let (src, seq) = match &config.alias {
-            None => (nwk_addr, self.get_seq_number()),
+            None => (nwk_addr, self.get_next_seq_number()),
             Some(alias) => (alias.src_addr, alias.seq_number),
         };
 
@@ -83,7 +83,7 @@ impl<T: ED + Sync + Send, D: NwkMac + Sync + Send, S: StorageRegion + Sync + Sen
             .maybe_radius(config.radius)
             .build();
 
-        let parent_addr = self.ctx.parent.nwk_addr;
+        let parent_addr = self.lock_parent(|parent| parent.nwk_addr);
         let payload = zb_types::Vec::from_slice(nsdu)
             .map_err(|_| NldeTransferError::InvalidRequest("frame too long"))?;
         let frame = NwkFrame::new_data_frame(header, payload);
@@ -92,7 +92,7 @@ impl<T: ED + Sync + Send, D: NwkMac + Sync + Send, S: StorageRegion + Sync + Sen
     }
 }
 
-impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S> {
+impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     pub(crate) async fn transmit_frame(
         &mut self,
         frame: &NwkFrame,
@@ -102,7 +102,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
         let mut mac_payload = [0u8; A_MAX_MAC_PAYLOAD_SIZE];
         let length = self.build_mac_payload(frame, &mut mac_payload)?;
 
-        self.mac
+        self.get_mac_mut()
             .data_transmit_request(dst_address, &mac_payload[..length], ack)
             .await
             .map_err(|err| NldeTransferError::McpsDataError(err))
@@ -134,13 +134,34 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
     }
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+pub fn build_mac_payload(frame: &NwkFrame, buffer: &mut [u8; A_MAX_MAC_PAYLOAD_SIZE], params: &EncryptedFrameParams) -> Result<usize, SecurityError> {
+    let length = if frame.is_secured()
+        && !matches!(frame, NwkFrame::Reserved(_) | NwkFrame::InterPan(_))
+    {
+        make_encrypted_frame(frame, buffer, params)?
+    } else {
+        let offset = &mut 0;
+        buffer.write_with(offset, frame.header().clone(), byte::LE)?;
+        match frame {
+            NwkFrame::Data(frame) => buffer.write_with(offset, frame.payload.as_slice(), ())?,
+            NwkFrame::NwkCommand(frame) => {
+                buffer.write_with(offset, frame.command.clone(), ())?
+            }
+            _ => {}
+        }
+        *offset
+    };
+
+    Ok(length)
+}
+
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     async fn route_unicast_frame(&mut self, frame: &NwkDataFrame) -> Result<(), NldeTransferError> {
         if self.try_unicast_direct_relay(frame).await {
             return Ok(());
         };
 
-        if self.get_router_ctx_mut().route_table.is_full() {
+        if self.get_route_table_mut().is_full() {
             if self.try_unicast_tree_routing(frame).await {
                 return Ok(());
             }
@@ -154,7 +175,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
 
         let routing_dst_addr =
             self.get_routing_address_for_address(frame.header.destination);
-        match self.get_router_ctx().route_record_table.iter().find(|route| {
+        match self.get_route_record_table().iter().find(|route| {
             route.network_address == routing_dst_addr && route.relay_count < NWK_MAX_SOURCE_ROUTE
         }) {
             Some(_route) => {
@@ -170,8 +191,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
 
     async fn route_multicast_frame(&mut self, frame: &mut NwkDataFrame) {
         match self
-            .ctx
-            .group_table
+            .get_group_table()
             .iter()
             .find(|item| **item == frame.header.destination)
         {
@@ -179,13 +199,11 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
                 // TODO: Multicast the frame according to the procedure outlined in section
                 // 3.6.6.2.1.
                 frame.header.multicast_control.unwrap().multicast_mode = MulticastMode::Member;
-                self.get_router_ctx_mut()
-                    .broadcast_transaction_table
+                self.get_broadcast_transaction_table_mut()
                     .retain(|t| t.expiration_time >= Instant::now());
 
-                let delivery_time = self.ctx.get_nwk_broadcast_delivery_time();
-                match self.get_router_ctx_mut()
-                    .broadcast_transaction_table
+                let delivery_time = self.get_nwk_broadcast_delivery_time();
+                match self.get_broadcast_transaction_table_mut()
                     .push(TransactionRecord {
                         source_address: frame.header.source,
                         sequence_number: frame.header.sequence_number,
@@ -199,8 +217,8 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
             }
             None => {
                 let key =
-                    &RouteEntryKey::new(&self.ctx.get_profile(), frame.header.destination, true);
-                let route = self.get_router_ctx_mut().route_table.get_mut(&key).filter(|route| {
+                    &RouteEntryKey::new(&self.get_profile(), frame.header.destination, true);
+                let route = self.get_route_table_mut().get_mut(&key).filter(|route| {
                     matches!(
                         route.status,
                         RouteStatus::Active | RouteStatus::ValidationUnderway
@@ -239,7 +257,7 @@ pub(super) struct TransmitBroadcastFrameCfg {
     pub payload_len: usize,
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     pub(super) async fn transmit_broadcast_frame(&mut self, frame: &NwkDataFrame) -> () {
         let mut mac_payload = [0u8; A_MAX_MAC_PAYLOAD_SIZE];
         let payload_len = match self.build_mac_payload(&NwkFrame::Data(frame.clone()), &mut mac_payload) {
@@ -248,9 +266,9 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
         };
 
         let _cfg = TransmitBroadcastFrameCfg {
-            jitter: self.rng.random_range(0..MAX_BROADCAST_JITTER.as_millis()),
-            nwk_passive_ack_timeout: self.ctx.get_profile().nwk_passive_ack_timeout,
-            max_retries: self.ctx.get_profile().nwk_max_broadcast_retries,
+            jitter: self.get_rng().random_range(0..MAX_BROADCAST_JITTER.as_millis()),
+            nwk_passive_ack_timeout: self.get_profile().nwk_passive_ack_timeout,
+            max_retries: self.get_profile().nwk_max_broadcast_retries,
             mac_payload,
             payload_len,
         };

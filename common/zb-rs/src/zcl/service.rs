@@ -5,10 +5,9 @@ use crate::apl::aps::apsde::ApsdeRequest;
 use crate::apl::aps::apsde::{ApsdeAddress, ApsdeDataIndication};
 use crate::apl::aps::types::ApsEndpoint;
 use crate::apl::zb_application::{ZigbeeApplication};
-use crate::apl::zdo::{JoinedCtx, ZbNode};
+use crate::apl::zdo::{EndDeviceNodeCtx, ZbNode, ZbNodeJoinedStatus};
 use crate::apl::zdp::service::OptionalApsdeResult;
 use crate::apl::zdp::service::to_optional;
-use crate::nwk::ctx::NwkJoined;
 use crate::zcl::cluster::types::ZclCluster;
 use crate::zcl::command::global::ConfigureReportingResponseCommand;
 use crate::zcl::command::global::DefaultResponseCommand;
@@ -26,7 +25,9 @@ use crate::zcl::frame::ZclFrameControl;
 use crate::zcl::frame::ZclFrameType;
 use crate::zcl::frame::ZclHeader;
 use crate::zcl::types::ZclStatus;
-use zb_hal::StorageRegion;
+use zb_hal::{NwkMac, StorageRegion};
+use crate::apl::aps::ctx::ApsTransmit;
+use crate::nwk::ctx::JoinedNwk;
 
 #[derive(Default)]
 pub struct EmitCommandFrameCfg {
@@ -168,7 +169,7 @@ fn handle_global_command(cmd: &GlobalZclCommand, cluster: &mut dyn ZclCluster) -
 
 
 
-impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
+impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
     pub async fn handle_zcl_command(
         &mut self,
         endpoint: ApsEndpoint,
@@ -271,7 +272,7 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
             radius: 0.into(),
         };
 
-        to_optional(self.ctx.aps.aps_data_request(apsde_sap_request).await)
+        to_optional(self.ctx.get_aps_mut().aps_data_request(apsde_sap_request).await)
     }
 }
 

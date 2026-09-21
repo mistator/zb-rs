@@ -12,22 +12,23 @@ pub trait LocalIeee802154Driver {
     fn is_rx_on_when_idle(&self) -> bool;
 
     fn get_pan_id(&self) -> Option<PanId>;
-    async fn set_pan_id(&mut self, pan_id: Option<PanId>) -> ();
+    fn set_pan_id(&mut self, pan_id: Option<PanId>) -> ();
     fn get_short_address(&self) -> Option<NwkAddress>;
-    async fn set_short_address(&mut self, short_addr: Option<NwkAddress>) -> ();
+    fn set_short_address(&mut self, short_addr: Option<NwkAddress>) -> ();
 
-    async fn set_channel(&mut self, channel: Channel) -> ();
+    fn get_channel(&self) -> Channel;
+    fn set_channel(&mut self, channel: Channel) -> ();
 
     async fn transmit(&mut self, frame: &[u8]) -> Result<(), byte::Error>;
 
-    async fn flush(&mut self) -> ();
-    async fn poll(&mut self) -> Option<MacFrame>;
+    fn flush(&mut self) -> ();
+    fn poll(&mut self) -> Option<MacFrame>;
     async fn wait_frame(&mut self) -> MacFrame;
 
-    async fn reset(&mut self, set_default_pib: bool) -> ();
+    fn reset(&mut self, set_default_pib: bool) -> ();
 }
 
-pub trait NwkMac: Ieee802154Driver {}
+pub trait NwkMac: Ieee802154Driver + Clone + Send + Sync {}
 
 #[derive(Clone, Copy, Debug, Error)]
 pub enum StorageError {
@@ -49,7 +50,7 @@ pub trait StoragePool {
     fn reserve_region(&mut self, size: u32) -> Result<Self::S, ()>;
 }
 
-pub trait StorageRegion : Clone {
+pub trait StorageRegion : Clone + Send + Sync {
     fn persist_with_offset(&mut self, offset: u32, buffer: &[u8]) -> Result<(), StorageError>;
     fn load_with_offset(&mut self, offset: u32, buffer: &mut [u8]) -> Result<(), StorageError>;
 

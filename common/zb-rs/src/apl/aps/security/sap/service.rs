@@ -5,7 +5,7 @@ use byte::TryRead;
 
 use crate::apl::aps::apsde::ApsdeError;
 use crate::apl::aps::constants::MAX_APS_PAYLOAD_SIZE;
-use crate::apl::aps::ctx::{ApsContext};
+use crate::apl::aps::ctx::{Aps, Apsme, ApsmeSecurity};
 use crate::apl::aps::frame::ApsCommand;
 use crate::apl::aps::frame::ApsCommandFrame;
 use crate::apl::aps::frame::ApsCommandFrameCtr;
@@ -33,7 +33,7 @@ use crate::apl::aps::security::types::common::StandardNetworkKeyDescriptor;
 use crate::apl::aps::security::types::common::TransportKeyData;
 use crate::apl::aps::security::types::common::TrustCenterLinkKeyData;
 use crate::apl::aps::security::types::common::TrustCenterLinkKeyDescriptor;
-use crate::apl::aps::security::types::indications::ApsmeConfirmKeyIndication;
+use crate::apl::aps::security::types::indications::{ApsmeConfirmKeyIndication, ApsmeRemoveDeviceIndication};
 use crate::apl::aps::security::types::indications::ApsmeTransportKeyIndication;
 use crate::apl::aps::security::types::indications::ApsmeUpdateDeviceIndication;
 use crate::apl::aps::types::ApsIndication;
@@ -47,18 +47,18 @@ use crate::common::security::primitives::CcmZigbee;
 use crate::common::security::primitives::HmacAes128Mmo;
 use crate::common::security::primitives::write_and_encrypt_in_place;
 use crate::nwk::constants::NWK_COORDINATOR_ADDRESS;
-use crate::nwk::ctx::{NwkJoined};
 use crate::nwk::nlde::NldeDataIndicationDstAddress;
 use crate::unwrap_or_return;
-use zb_hal::StorageRegion;
+use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::nwk::ctx::{BaseNwk, InitializedNwk, JoinedAsRouter, JoinedNwk, JoinedState, Nwk, RoutingNwk, RoutingState};
 
 pub type UpdateDeviceRequest = UpdateDeviceCommand;
 pub type ApsSecurityResult = Result<(), ApsmeSecurityError>;
 
-impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
-    pub async fn transport_key(
+impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> ApsmeSecurity for Aps<T, D, S> {
+    async fn transport_key(
         &mut self,
         dst_addr: ExtendedAddress,
         transport_key_data: TransportKeyData,
@@ -98,12 +98,12 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         self.send_apsme_security_command(dest_address, command).await
     }
 
-    pub async fn update_device(&mut self, dst_addr: ExtendedAddress, req: UpdateDeviceRequest) -> ApsSecurityResult {
+    async fn update_device(&mut self, dst_addr: ExtendedAddress, req: UpdateDeviceRequest) -> ApsSecurityResult {
         let command = ApsCommand::UpdateDevice(req);
         self.send_apsme_security_command(dst_addr, command).await
     }
 
-    pub async fn remove_device(
+    async fn remove_device(
         &mut self,
         parent_address: ExtendedAddress,
         target_address: ExtendedAddress,
@@ -112,7 +112,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         self.send_apsme_security_command(parent_address, command).await
     }
 
-    pub async fn request_key(
+    async fn request_key(
         &mut self,
         dest_address: ExtendedAddress,
         key_type: RequestKeyType,
@@ -121,7 +121,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         self.send_apsme_security_command(dest_address, cmd).await
     }
 
-    pub async fn switch_key(
+    async fn switch_key(
         &mut self,
         dest_address: ExtendedAddress,
         key_sequence_number: u8,
@@ -146,7 +146,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         }
     }
 
-    pub async fn verify_key(&mut self) -> ApsSecurityResult {
+    async fn verify_key(&mut self) -> ApsSecurityResult {
         // TODO: check if we are the trust center and ignore if so
         let tc_addr = if let SecurityNetworkParams::Centralized(ext_addr) = self.security_network_params
         {
@@ -165,7 +165,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
                 ApsmeSecurityError::CommandValidationError
             })?;
 
-        let initiator_verify_key_hash = HmacAes128Mmo::hmac(&key_descriptor.link_key, &[0x03])
+        let initiator_verify_key_hash = HmacAes128Mmo::hmac(&key_descriptor.link_key.as_slice(), &[0x03])
             .map_err(|_| {
                 log::warn!("[VERIFY-KEY] hmac verification failed");
                 ApsmeSecurityError::CommandValidationError
@@ -174,12 +174,12 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         let cmd = ApsCommand::VerifyKey(VerifyKeyCommand {
             key_type: StandardKeyType::TrustCenterLinkKey,
             source_address: self.nwk.get_ext_addr(),
-            initiator_hash_value: initiator_verify_key_hash,
+            initiator_hash_value: *initiator_verify_key_hash.as_array(),
         });
 
         let nwk_address = self
             .nwk
-            .find_nwk_addr(&tc_addr)
+            .find_nwk_addr(tc_addr)
             .ok_or_else(|| {
                 log::warn!("[VERIFY-KEY] could not find network address associated with trust center");
                 ApsmeSecurityError::ApsdeSapError(ApsdeError::NoShortAddress)
@@ -195,7 +195,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
             .map_err(ApsmeSecurityError::from)
     }
 
-    pub async fn confirm_key(
+    async fn confirm_key(
         &mut self,
         dest_address: ExtendedAddress,
         status: ConfirmKeyStatus,
@@ -233,7 +233,9 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
 
         self.send_apsme_security_command(dest_address, cmd).await
     }
+}
 
+impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
     async fn send_apsme_security_command(
         &mut self,
         dest_address: ExtendedAddress,
@@ -241,7 +243,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
     ) -> Result<(), ApsmeSecurityError> {
         let nwk_address = self
             .nwk
-            .find_nwk_addr(&dest_address)
+            .find_nwk_addr(dest_address)
             .ok_or_else(|| {
                 log::warn!("couldn't send APS security command: nwk address for extended address `{:?}` not found", dest_address);
                 ApsmeSecurityError::ApsdeSapError(ApsdeError::NoShortAddress)
@@ -387,7 +389,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
                 None
             }
             StandardKeyDescriptor::ApplicationLinkKey(desc) => {
-                let addr = self.nwk.find_ext_addr(&src_address)?;
+                let addr = self.nwk.find_ext_addr(src_address)?;
 
                 Some(ApsIndication::TransportKey(ApsmeTransportKeyIndication {
                     ext_src_addr: addr,
@@ -418,7 +420,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         src_address: NwkAddress,
         cmd: &UpdateDeviceCommand,
     ) -> Option<ApsIndication> {
-        let src = self.nwk.find_ext_addr(&src_address)?;
+        let src = self.nwk.find_ext_addr(src_address)?;
 
         Some(ApsIndication::UpdateDevice(ApsmeUpdateDeviceIndication {
             src_address: src,
@@ -426,14 +428,6 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
             device_short_address: cmd.device_short_address,
             status: cmd.status,
         }))
-    }
-
-    pub fn handle_remove_device_command(
-        &self,
-        src_addr: NwkAddress,
-        cmd: &RemoveDeviceCommand,
-    ) -> () {
-        // TODO: generate NLME-LEAVE.request
     }
 
     pub fn handle_request_key_command(
@@ -481,7 +475,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
             }
         };
 
-        let src_address = self.nwk.find_ext_addr(&src_address)?;
+        let src_address = self.nwk.find_ext_addr(src_address)?;
 
         // TODO: check fi we are the trust center and drop indication if so
 
@@ -733,10 +727,24 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
     }
 }
 
+
+impl<D: NwkMac, S: StorageRegion> Aps<Nwk<JoinedAsRouter, D, S>, D, S> {
+    pub fn handle_remove_device_command(
+        &self,
+        src_address: NwkAddress,
+        cmd: &RemoveDeviceCommand,
+    ) -> Option<ApsIndication> {
+        Some(ApsIndication::RemoveDevice(ApsmeRemoveDeviceIndication {
+            src_address: self.nwk.find_ext_addr(src_address)?,
+            target_address: cmd.target_address
+        }))
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apl::aps::ctx::ApsContext;
     use crate::apl::aps::security::types::common::{DeviceKeyPairDescriptor, KeyAttribute, LinkKeyType};
     use crate::apl::aps::types::TxOptions;
     use crate::common::security::TRUST_CENTER_LINK_KEY;
@@ -789,13 +797,13 @@ mod tests {
             link_key_type: LinkKeyType::GlobalLinkKey,
         };
 
-        let mut aps = ApsContext::end_device()
+        let mut aps = Aps::end_device()
             .key_pair_desc(key_desc)
             .call();
 
         let (frame, _) = aps.decrypt_aps_frame(&mut buf).unwrap();
 
-        let mut aps = ApsContext::end_device()
+        let mut aps = Aps::end_device()
             .ext_addr(ExtendedAddress(0xa4c1_389c_3830_01e5))
             .key_pair_desc(key_desc)
             .call();
@@ -830,14 +838,14 @@ mod tests {
             link_key_type: LinkKeyType::GlobalLinkKey,
         };
 
-        let mut aps = ApsContext::end_device()
+        let mut aps = Aps::end_device()
             .key_pair_desc(key_pair)
             .call();
         let mut buf = frame_buffer;
 
         let (frame, _) = aps.decrypt_aps_frame(&mut buf).unwrap();
 
-        let mut aps = ApsContext::end_device()
+        let mut aps = Aps::end_device()
             .ext_addr(ExtendedAddress(0xf4ce_36c1_7d38_52e1))
             .key_pair_desc(key_pair)
             .call();
@@ -871,13 +879,13 @@ mod tests {
         };
         let mut buf = frame_buffer;
 
-        let mut aps = ApsContext::end_device()
+        let mut aps = Aps::end_device()
             .key_pair_desc(key_pair)
             .call();
 
         let (frame, _) = aps.decrypt_aps_frame(&mut buf).unwrap();
 
-        let mut aps = ApsContext::end_device()
+        let mut aps = Aps::end_device()
             .ext_addr(ExtendedAddress(0xf4ce_36c1_7d38_52e1))
             .key_pair_desc(key_pair)
             .call();

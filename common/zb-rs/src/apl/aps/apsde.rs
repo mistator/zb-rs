@@ -5,7 +5,7 @@ use crate::apl::aps::apsme::BindingAddress;
 use crate::apl::aps::constants::MAX_APS_FRAME_SIZE;
 use crate::apl::aps::constants::MAX_APS_PAYLOAD_SIZE;
 use crate::apl::aps::constants::MAX_FRAME_RETRIES;
-use crate::apl::aps::ctx::{ApsContext};
+use crate::apl::aps::ctx::{Aps, ApsListen, ApsTransmit, Apsme};
 use crate::apl::aps::frame::ApsCommand;
 use crate::apl::aps::frame::ApsCommandFrame;
 use crate::apl::aps::frame::ApsDataFrame;
@@ -23,8 +23,7 @@ use crate::apl::aps::types::ApsIndication;
 use crate::apl::aps::types::SrcAddrMode;
 use crate::apl::aps::types::TxOptions;
 use crate::common::security::SecurityError;
-use crate::nwk::ctx::{NwkJoined};
-use crate::nwk::nlde::NldeDataIndication;
+use crate::nwk::nlde::{NldeDataIndication, NlmeLeaveIndication};
 use crate::nwk::nlde::NldeDataIndicationDstAddress;
 use crate::nwk::nlde::NldeTransferError;
 use crate::nwk::nlde::NwkIndication;
@@ -40,9 +39,10 @@ use embassy_time::Duration;
 use embassy_time::TimeoutError;
 use embassy_time::Timer;
 use thiserror::Error;
-use zb_hal::StorageRegion;
+use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::nwk::ctx::{BaseNwk, InitializedNwk, JoinedAsEndDevice, JoinedAsRouter, JoinedNwk, JoinedState, NonRoutingState, Nwk, NwkListen, NwkTransmit, RoutingNwk, RoutingState};
 
 #[derive(Clone, Copy, Default, Debug)]
 pub enum ApsdeDataIndicationSecurityStatus {
@@ -126,8 +126,8 @@ pub enum ApsdeError {
 pub type ApsdeResult = Result<ApsdeSapConfirm, ApsdeError>;
 
 // 2.2.4.1.1
-impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
-    pub async fn aps_data_request<T>(&mut self, request: ApsdeRequest<T>) -> ApsdeResult
+impl<J: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> ApsTransmit for Aps<J, D, S> {
+    async fn aps_data_request<T>(&mut self, request: ApsdeRequest<T>) -> ApsdeResult
     where
         T: TryWrite<Endian> + Clone,
     {
@@ -238,7 +238,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
             ApsdeAddress::Extended(addr, dst_endpoint) => {
                 let addr = self
                     .nwk
-                    .find_nwk_addr(&addr)
+                    .find_nwk_addr(addr)
                     .ok_or(ApsdeError::NoShortAddress)?;
                 self.aps_data_transfer(&ApsAddress::Network(addr, dst_endpoint), &request).await?;
             }
@@ -250,11 +250,13 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
             tx_time: 0,
         })
     }
+}
 
+impl<J: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<J, D, S> {
     fn get_short_address(&self, address: ApsdeAddress) -> Option<NwkAddress> {
         match address {
             ApsdeAddress::Network(addr, _) => Some(addr),
-            ApsdeAddress::Extended(addr, _) => self.nwk.find_nwk_addr(&addr),
+            ApsdeAddress::Extended(addr, _) => self.nwk.find_nwk_addr(addr),
             _ => None,
         }
     }
@@ -494,7 +496,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         // processing fails, the APSDE shall issue the APSDE-DATA.confirm primitive
         // with a status of SECURITY_FAIL.
         let len = if options.security_enabled {
-            let dst_addr = self.nwk.find_ext_addr(&dst)
+            let dst_addr = self.nwk.find_ext_addr(dst)
                 .ok_or_else(|| {
                     log::warn!("couldn't encrypt APS frame: matching IEEE address not found for destination address");
                     ApsdeError::SecurityError(SecurityError::Unspecified)
@@ -565,61 +567,118 @@ pub struct ApsdeSapIndication {
     rx_time: u8,
 }
 
-impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
-    pub async fn wait_for_indication<T>(
-        &mut self,
-        timeout: Duration,
-        eval: fn(&ApsIndication) -> Option<T>,
-    ) -> Result<T, TimeoutError> {
-        let timeout = Timer::after(timeout);
-
-        let receive = self.wait_for_indication_no_timeout(eval);
-
-        match select(timeout, receive).await {
-            Either::First(_) => Err(TimeoutError),
-            Either::Second(result) => Ok(result),
-        }
-    }
-
-    pub async fn wait_for_indication_no_timeout<T>(&mut self, eval: fn(&ApsIndication) -> Option<T>) -> T {
-        loop {
-            let indication = self.listen_aps().await;
-            if let Some(result) = eval(&indication) {
-                return result;
-            } else {
-                log::info!(
-                "[APSDE-INDICATION] received other indication {:?}",
-                indication
-            );
-                continue;
-            }
-        }
-    }
-
-    pub async fn listen_aps(&mut self) -> ApsIndication {
+impl<D: NwkMac, S: StorageRegion> ApsListen for Aps<Nwk<JoinedAsEndDevice, D, S>, D, S> {
+    async fn listen_aps(&mut self) -> ApsIndication {
         loop {
             let is_authorized = self.is_authorized();
             let mut nwk_indication = self.nwk.listen_nwk(is_authorized).await;
 
-            let result = self.handle_indication_common(&mut nwk_indication)
-                .await
-                .or(match nwk_indication {
-                    NwkIndication::Join(_) => None,
-                    _ => None,
-                });
+            let result = if let NwkIndication::Data(mut indication) = nwk_indication {
+                self.handle_data_indication(&mut indication).await
+            } else {
+                self.handle_indication_common(&mut nwk_indication).await
+            };
 
             if let Some(aps_indication) = result {
                 return aps_indication;
             }
         }
     }
+}
 
+impl<D: NwkMac, S: StorageRegion> Aps<Nwk<JoinedAsEndDevice, D, S>, D, S> {
+    async fn handle_data_indication(
+        &mut self,
+        indication: &mut NldeDataIndication,
+    ) -> Option<ApsIndication> {
+        let (frame, key_descriptor) = self.decrypt_aps_frame(indication.nsdu.as_mut_slice()).ok()?;
+
+        match frame {
+            ApsFrame::Data(dataframe) => self.handle_data_frame(dataframe, indication, key_descriptor).await,
+            ApsFrame::ApsCommand(ref cmd_frame) => {
+                self.validate_incoming_apsme_command(indication.src_address, &cmd_frame, key_descriptor)
+                    .map_err(|err| {
+                        log::warn!("received invalid APS command: {:?}", err);
+                    }).ok()?;
+
+                self.handle_aps_command_common(
+                    indication.src_address,
+                    indication.dst_address,
+                    cmd_frame,
+                )
+            },
+            ApsFrame::Acknowledgement(_) => None,
+        }
+    }
+}
+
+impl<D: NwkMac, S: StorageRegion> ApsListen for Aps<Nwk<JoinedAsRouter, D, S>, D, S> {
+    async fn listen_aps(&mut self) -> ApsIndication {
+        loop {
+            let is_authorized = self.is_authorized();
+            let mut nwk_indication = self.nwk.listen_nwk(is_authorized).await;
+
+            let result = if let NwkIndication::Data(mut indication) = nwk_indication {
+                self.handle_data_indication(&mut indication).await
+            } else {
+                self.handle_indication_common(&mut nwk_indication).await
+            };
+
+            if let Some(aps_indication) = result {
+                return aps_indication;
+            }
+        }
+    }
+}
+
+impl<D: NwkMac, S: StorageRegion> Aps<Nwk<JoinedAsRouter, D, S>, D, S> {
+    async fn handle_data_indication(
+        &mut self,
+        indication: &mut NldeDataIndication,
+    ) -> Option<ApsIndication> {
+        let (frame, key_descriptor) = self.decrypt_aps_frame(indication.nsdu.as_mut_slice()).ok()?;
+
+        match frame {
+            ApsFrame::Data(dataframe) => self.handle_data_frame(dataframe, indication, key_descriptor).await,
+            ApsFrame::ApsCommand(ref cmd_frame) => {
+                self.validate_incoming_apsme_command(indication.src_address, &cmd_frame, key_descriptor)
+                    .map_err(|err| {
+                        log::warn!("received invalid APS command: {:?}", err);
+                    }).ok()?;
+                
+                let result = self.handle_aps_command_common(
+                    indication.src_address,
+                    indication.dst_address,
+                    cmd_frame,
+                );
+                
+                if result.is_some() {
+                    return result;
+                }
+                
+                match cmd_frame.command {
+                    ApsCommand::RemoveDevice(ref cmd) => self.handle_remove_device_command(indication.src_address, cmd),
+                    ApsCommand::RequestKey(_) => None, 
+                    ApsCommand::SwitchKey(_) => None,
+                    ApsCommand::VerifyKey(_) => None,
+                    _ => None
+                }
+            },
+            ApsFrame::Acknowledgement(_) => None,
+        }
+    }
+}
+
+impl<J: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<J, D, S> {
     async fn handle_indication_common(&mut self, indication: &mut NwkIndication) -> Option<ApsIndication> {
          match indication {
-             NwkIndication::Data(nlde_indication) => {
-                 self.handle_nlde_indication(nlde_indication).await
-             }
-             NwkIndication::Leave(_) => None,
+             // TODO
+             NwkIndication::Leave(leave_indication) => match leave_indication {
+                 NlmeLeaveIndication::LeaveSelf { .. } => { Some(ApsIndication::Leave(*leave_indication)) }
+                 NlmeLeaveIndication::LeaveChild { .. } => { None }
+                 NlmeLeaveIndication::LeaveParent { .. } => { None }
+             },
+             NwkIndication::Join(_) => None,
              NwkIndication::Status(_) => None,
              NwkIndication::DutyCycle(_) => None,
              NwkIndication::SyncLoss => None,
@@ -627,12 +686,13 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         }
     }
 
-    async fn handle_nlde_indication(
-        &mut self,
-        indication: &mut NldeDataIndication,
-    ) -> Option<ApsIndication> {
-        let (frame, key_descriptor) = self.decrypt_aps_frame(indication.nsdu.as_mut_slice()).ok()?;
 
+    async fn handle_data_frame(
+        &mut self,
+       dataframe: ApsDataFrame,
+       indication: &NldeDataIndication,
+       key_descriptor: Option<DeviceKeyPairDescriptor>
+    ) -> Option<ApsIndication> {
         let security_status = if key_descriptor.is_some() {
             ApsdeDataIndicationSecurityStatus::SecuredLinkKey
         } else if indication.security_use {
@@ -641,72 +701,54 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
             ApsdeDataIndicationSecurityStatus::Unsecured
         };
 
-        match frame {
-            ApsFrame::Data(dataframe) => {
-                let hdr = dataframe.header;
-                let src_endpoint = hdr.source_endpoint.unwrap();
+        let hdr = dataframe.header;
+        let src_endpoint = hdr.source_endpoint.unwrap();
 
-                let src = match self.nwk.find_ext_addr(&indication.src_address) {
-                    Some(addr) => ApsdeAddress::Extended(addr, src_endpoint),
-                    _ => ApsdeAddress::Network(indication.src_address, src_endpoint),
-                };
+        let src = match self.nwk.find_ext_addr(indication.src_address) {
+            Some(addr) => ApsdeAddress::Extended(addr, src_endpoint),
+            _ => ApsdeAddress::Network(indication.src_address, src_endpoint),
+        };
 
-                if hdr.frame_control.ack_request {
-                    self.send_ack(
-                        AckFormat::Data {
-                            dst_endpoint: hdr.source_endpoint.unwrap(),
-                            cluster_id: hdr.cluster_id.unwrap(),
-                            profile_id: hdr.profile_id.unwrap(),
-                            src_endpoint: hdr.destination_endpoint.unwrap(),
-                        },
-                        hdr.counter,
-                        indication.src_address,
-                    )
-                        .await
-                        .ok();
-                }
-
-                let indication = ApsdeDataIndication {
-                    src,
-                    dst: ApsAddress::Network(
-                        match indication.dst_address {
-                            NldeDataIndicationDstAddress::Multicast(addr) => addr,
-                            NldeDataIndicationDstAddress::UnicastOrBroadcast(addr) => addr,
-                        },
-                        hdr.destination_endpoint.unwrap(),
-                    ),
-                    profile_id: hdr.profile_id.unwrap(),
+        if hdr.frame_control.ack_request {
+            self.send_ack(
+                AckFormat::Data {
+                    dst_endpoint: hdr.source_endpoint.unwrap(),
                     cluster_id: hdr.cluster_id.unwrap(),
-                    asdu: dataframe.payload,
-                    link_quality: indication.link_quality,
-                    security_status,
-                };
-
-                Some(ApsIndication::Data(indication))
-            }
-            ApsFrame::ApsCommand(ref cmd_frame) => self.handle_aps_command(
+                    profile_id: hdr.profile_id.unwrap(),
+                    src_endpoint: hdr.destination_endpoint.unwrap(),
+                },
+                hdr.counter,
                 indication.src_address,
-                indication.dst_address,
-                cmd_frame,
-                key_descriptor,
-            ),
-            ApsFrame::Acknowledgement(_) => None,
+            )
+                .await
+                .ok();
         }
+
+        let indication = ApsdeDataIndication {
+            src,
+            dst: ApsAddress::Network(
+                match indication.dst_address {
+                    NldeDataIndicationDstAddress::Multicast(addr) => addr,
+                    NldeDataIndicationDstAddress::UnicastOrBroadcast(addr) => addr,
+                },
+                hdr.destination_endpoint.unwrap(),
+            ),
+            profile_id: hdr.profile_id.unwrap(),
+            cluster_id: hdr.cluster_id.unwrap(),
+            asdu: dataframe.payload,
+            link_quality: indication.link_quality,
+            security_status,
+        };
+
+        Some(ApsIndication::Data(indication))
     }
 
-    fn handle_aps_command(
+    fn handle_aps_command_common(
         &mut self,
         src_address: NwkAddress,
         dst_address: NldeDataIndicationDstAddress,
         frame: &ApsCommandFrame,
-        key_descriptor: Option<DeviceKeyPairDescriptor>,
     ) -> Option<ApsIndication> {
-        let result = self.validate_incoming_apsme_command(src_address, &frame, key_descriptor);
-        if result.is_err() {
-            log::warn!("received invalid APS command: {:?}", result.err());
-            return None;
-        }
-
         match frame.command {
             ApsCommand::TransportKey(ref cmd) => {
                 self.handle_transport_key_command(src_address, frame, &cmd)
@@ -738,7 +780,7 @@ enum AckFormat {
     },
 }
 
-impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
+impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
     async fn send_ack(
         &mut self,
         ack_format: AckFormat,

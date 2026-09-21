@@ -1,5 +1,6 @@
+use alloc::sync::Arc;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::mutex::Mutex;
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::signal::Signal;
 use esp_hal::efuse;
 use esp_radio::ieee802154::Error;
@@ -12,15 +13,15 @@ use zb_types::mac::{Channel, ChannelMask, MacFrame};
 
 static TX_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static RX_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
-static DRIVER: Mutex<CriticalSectionRawMutex, Option<Ieee802154<'static>>> = Mutex::new(None);
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Esp32Driver {
-    config: Config,
     ext_addr: ExtendedAddress,
     default_channel: u8,
     rx_when_idle: bool,
     rx_queue_size: usize,
+    config: Arc<Mutex<CriticalSectionRawMutex, Config>>,
+    driver: Arc<Mutex<CriticalSectionRawMutex, Ieee802154<'static>>>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -29,24 +30,15 @@ pub struct MultipleInitializationError;
 #[bon::bon]
 impl Esp32Driver {
     #[builder]
-    pub async fn new(
+    pub fn new(
         #[builder(start_fn)] mut driver: Ieee802154<'static>,
         ext_addr: Option<ExtendedAddress>,
         #[builder(default = 11)] default_channel: u8,
         #[builder(default = true)] rx_when_idle: bool,
         #[builder(default = 10)] rx_queue_size: usize,
     ) -> Result<Self, MultipleInitializationError> {
-        {
-            let mut lck = DRIVER.lock().await;
-            if (*lck).is_some() {
-                return Err(MultipleInitializationError);
-            }
-
-            driver.set_rx_available_callback_fn(Self::rx_callback);
-            driver.set_tx_done_callback_fn(Self::tx_callback);
-
-            *lck = Some(driver);
-        }
+        driver.set_rx_available_callback_fn(Self::rx_callback);
+        driver.set_tx_done_callback_fn(Self::tx_callback);
 
         let ext_addr = ext_addr.unwrap_or_else(|| {
             let mac = efuse::base_mac_address();
@@ -58,29 +50,23 @@ impl Esp32Driver {
         });
 
         let mut slf = Self {
-            config: Config::default(),
+            config: Arc::new(Mutex::new(Config::default())),
+            driver: Arc::new(Mutex::new(driver)),
             ext_addr,
             default_channel,
             rx_when_idle,
             rx_queue_size,
         };
-        slf.reset(true).await;
+        slf.reset(true);
 
         Ok(slf)
     }
 }
 
 impl Esp32Driver {
-    async fn use_driver<Output, F: FnOnce(&mut Ieee802154<'static>) -> Output>(cb: F) -> Output {
-        let mut lck = DRIVER.lock().await;
-        let driver = lck.as_mut().unwrap();
-
-        cb(driver)
-    }
-
-    async fn set_config(&self) {
-        Self::use_driver(|driver| driver.set_config(self.config))
-            .await;
+    fn set_config(&self) {
+        let config = self.config.lock(|config| config.clone());
+        unsafe { self.driver.lock_mut(|driver| driver.set_config(config)); }
     }
 
     fn rx_callback() {
@@ -107,47 +93,51 @@ impl Ieee802154Driver for Esp32Driver {
     }
 
     fn is_rx_on_when_idle(&self) -> bool {
-        self.config.rx_when_idle
+        self.config.lock(|config| config.rx_when_idle)
     }
 
     fn get_pan_id(&self) -> Option<PanId> {
-        self.config.pan_id.map(PanId)
+        self.config.lock(|config| config.pan_id).map(PanId)
     }
 
-    async fn set_pan_id(&mut self, pan_id: Option<PanId>) -> () {
-        self.config.pan_id = pan_id.map(|pan_id| pan_id.0);
-        self.set_config().await
+    fn set_pan_id(&mut self, pan_id: Option<PanId>) -> () {
+        unsafe { self.config.lock_mut(|config| config.pan_id = pan_id.map(|pan_id| pan_id.0)) }
+        self.set_config();
     }
 
     fn get_short_address(&self) -> Option<NwkAddress> {
-        self.config.short_addr.map(NwkAddress)
+        self.config.lock(|config| config.short_addr).map(NwkAddress)
     }
 
-    async fn set_short_address(&mut self, short_addr: Option<NwkAddress>) -> () {
-        self.config.short_addr = short_addr.map(|short_addr| short_addr.0);
-        self.set_config().await;
+    fn set_short_address(&mut self, short_addr: Option<NwkAddress>) -> () {
+        unsafe { self.config.lock_mut(|config| config.short_addr = short_addr.map(|addr| addr.0)) }
+        self.set_config();
     }
 
-    async fn set_channel(&mut self, channel: Channel) -> () {
-        self.config.channel = channel as u8;
-        self.set_config().await;
+    fn get_channel(&self) -> Channel {
+        Channel::from(self.config.lock(|config| config.channel))
+    }
+
+    fn set_channel(&mut self, channel: Channel) -> () {
+        unsafe { self.config.lock_mut(|config| config.channel = channel as u8) };
+        self.set_config();
     }
 
     async fn transmit(&mut self, frame: &[u8]) -> Result<(), byte::Error> {
         TX_SIGNAL.reset();
-        let result = Self::use_driver(|driver| {
+        let result = unsafe { self.driver.lock_mut(|driver| {
             driver.transmit_raw(frame, true).map_err(|err| match err {
                 Error::Incomplete => byte::Error::Incomplete,
                 Error::BadInput => byte::Error::BadInput {
                     err: "error transmitting frame in ESP32 driver",
                 },
             })
-        }).await;
+        }) };
 
         match result {
             Err(err) => {
                 log::warn!("[ESP32-DRIVER] error transmitting frame: {:?}", err);
-                Self::use_driver(|driver| driver.start_receive()).await;
+                unsafe { self.driver.lock_mut(|driver| driver.start_receive()); }
                 Err(err)
             }
             Ok(()) => {
@@ -157,12 +147,12 @@ impl Ieee802154Driver for Esp32Driver {
         }
     }
 
-    async fn flush(&mut self) -> () {
-        while self.poll().await.is_some() {}
+    fn flush(&mut self) -> () {
+        while self.poll().is_some() {}
     }
 
-    async fn poll(&mut self) -> Option<MacFrame> {
-        Self::use_driver(|driver| {
+    fn poll(&mut self) -> Option<MacFrame> {
+        unsafe { self.driver.lock_mut(|driver| {
             driver
                 .received()?
                 .map_err(|err| {
@@ -176,36 +166,38 @@ impl Ieee802154Driver for Esp32Driver {
                     payload: Vec::from_iter(rf.frame.payload),
                     footer: rf.frame.footer,
                 })
-        }).await
+        }) }
     }
 
     async fn wait_frame(&mut self) -> MacFrame {
         loop {
-            if let Some(result) = self.poll().await {
+            if let Some(result) = self.poll() {
                 return result;
             }
             self.wait_rx_available().await;
         }
     }
 
-    async fn reset(&mut self, set_default_pib: bool) {
-        self.config.auto_ack_tx = true;
-        self.config.auto_ack_rx = true;
-        self.config.promiscuous = true;
-        self.config.rx_when_idle = self.rx_when_idle;
-        self.config.rx_queue_size = self.rx_queue_size;
-        self.config.txpower = 10;
-        self.config.cca_threshold = -60;
-        self.config.cca_mode = CcaMode::Ed;
-        self.config.enhance_ack_tx = false;
+    fn reset(&mut self, set_default_pib: bool) {
+        unsafe { self.config.lock_mut(|config| {
+            config.auto_ack_tx = true;
+            config.auto_ack_rx = true;
+            config.promiscuous = true;
+            config.rx_when_idle = self.rx_when_idle;
+            config.rx_queue_size = self.rx_queue_size;
+            config.txpower = 10;
+            config.cca_threshold = -60;
+            config.cca_mode = CcaMode::Ed;
+            config.enhance_ack_tx = false;
 
-        if set_default_pib {
-            self.config.pan_id = None;
-            self.config.short_addr = None;
-            self.config.channel = self.default_channel;
-        }
+            if set_default_pib {
+                config.pan_id = None;
+                config.short_addr = None;
+                config.channel = self.default_channel;
+            }
+        }); }
 
-        self.set_config().await
+        self.set_config()
     }
 }
 

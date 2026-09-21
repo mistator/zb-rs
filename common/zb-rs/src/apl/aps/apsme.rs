@@ -1,12 +1,13 @@
-use crate::apl::aps::ctx::{ApsContext};
+use crate::apl::aps::ctx::{Aps, Apsme, DeviceKeyPairDescriptorSet};
 use crate::apl::aps::types::ApsAddress;
 use crate::apl::aps::types::ApsEndpoint;
-use crate::nwk::ctx::{NwkJoined};
 use byte_derive::TryRead;
 use byte_derive::TryWrite;
-use zb_hal::StorageRegion;
+use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::common::security::SecurityNetworkParams;
+use crate::nwk::ctx::{JoinedNwk, JoinedState, Nwk};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, TryRead, TryWrite)]
 #[repr(u8)]
@@ -92,8 +93,8 @@ pub struct ApsmeAddrGroupRequest {
     endpoint: u8,
 }
 
-impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
-    pub(crate) fn bind_request(&mut self, binding: Binding) -> Result<(), ApsmeBindError> {
+impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Apsme for Aps<T, D, S> {
+    fn bind_request(&mut self, binding: Binding) -> Result<(), ApsmeBindError> {
         self.binding_table.insert(binding)
             .map(|_| ())
             .map_err(|_| {
@@ -102,7 +103,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
             })
     }
 
-    pub(crate) fn unbind_request(&mut self, binding: Binding) -> Result<(), ApsmeUnbindError> {
+    fn unbind_request(&mut self, binding: Binding) -> Result<(), ApsmeUnbindError> {
         if self.binding_table.remove(&binding) {
             Ok(())
         } else {
@@ -143,5 +144,23 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
     fn remove_all_groups(&mut self, _endpoint: u8) -> Result<(), ApsmeRemoveAllGroupsError> {
         todo!()
     }
+
+    fn is_authorized(&self) -> bool { self.is_authorized }
+    fn set_authorized(&mut self) -> () { self.is_authorized = true}
+    fn get_security_network_params(&self) -> SecurityNetworkParams { self.security_network_params }
+
+    fn get_tc_addr(&self) -> Option<ExtendedAddress> {
+        match self.security_network_params {
+            SecurityNetworkParams::Centralized(addr) => Some(addr),
+            SecurityNetworkParams::Distributed => None
+        }
+    }
+
+    fn get_device_key_pair_set(&self) -> &DeviceKeyPairDescriptorSet { &self.device_key_pair_set }
+    fn get_device_key_pair_set_mut(&mut self) -> &mut DeviceKeyPairDescriptorSet {
+        &mut self.device_key_pair_set
+    }
+
+    fn set_parent_announce_timer(&mut self, timer: f32) -> () { self.parent_announce_timer = timer }
 }
 

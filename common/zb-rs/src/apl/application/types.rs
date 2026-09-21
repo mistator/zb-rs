@@ -1,6 +1,5 @@
 use crate::zcl::cluster::types::ZclCluster;
 use core::any::Any;
-use core::fmt::Debug;
 
 const ZB_PROFILE_PLANT_MONITORING: u16 = 0x0101;
 const ZB_PROFILE_HOME_AUTOMATION: u16 = 0x0104;

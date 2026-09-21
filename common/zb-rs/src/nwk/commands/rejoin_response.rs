@@ -1,5 +1,4 @@
 use crate::nwk::commands::Command;
-use crate::nwk::ctx::{Initialized, Joined, Nwk, Router};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nlde::TransferResult;
@@ -11,6 +10,7 @@ use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::try_write_impl;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::nwk::ctx::{Nwk, RoutingState};
 
 #[derive(Clone, Copy, Debug)]
 pub enum RejoinResponse {
@@ -66,7 +66,7 @@ pub struct RejoinResponseCmd {
     pub rejoin_response: RejoinResponse,
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S>  {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S>  {
     pub async fn send_rejoin_response_cmd(
         &mut self,
         cfg: &RejoinResponseCmd,

@@ -1,6 +1,7 @@
 #![cfg_attr(not(test), no_std)]
 pub mod common;
 pub mod mac;
+pub mod transitions;
 
 use cfg_if::cfg_if;
 use core::hash::Hash;
@@ -11,6 +12,8 @@ cfg_if! {
         use core::convert::Infallible;
 
         extern crate alloc;
+
+        pub type CapacityResult = Result<(), Infallible>;
 
         macro_rules! call {
             ($call: expr) => {
@@ -26,9 +29,11 @@ cfg_if! {
 
         type InnerVec<T, const N: usize> = alloc::vec::Vec<T>;
         type InnerHashMap<K, V, const N: usize> = hashbrown::HashMap<K, V>;
-        type InnerHashSet<K, V, const N: usize> = hashbrown::HashSet<K, V>;
+        type InnerHashSet<K, const N: usize> = hashbrown::HashSet<K>;
     } else {
         use heapless::CapacityError;
+
+        pub type CapacityResult = Result<(), CapacityError>;
 
         macro_rules! call {
             ($call: expr) => {
@@ -92,5 +97,19 @@ impl<K: Eq + Hash, V, const N: usize> HashMap<K, V, N>
 }
 
 #[derive(Debug, Clone, Deref, DerefMut, IntoIterator)]
-pub struct HashSet<K, V, const N: usize>(InnerHashSet<K, V, N>);
+pub struct HashSet<T, const N: usize>(#[into_iterator(owned, ref, ref_mut)] InnerHashSet<T, N>);
 
+impl<T, const N: usize> HashSet<T, N> {
+    pub fn new() -> Self { Self(InnerHashSet::<T, N>::default()) }
+}
+
+impl<T: Eq + Hash, const N: usize> HashSet<T, N> {
+    pub fn insert(&mut self, value: T) -> result!(bool, T) { call!(self.0.insert(value)) }
+    pub fn push(&mut self, value: T) -> result!(bool, T) { call!(self.0.insert(value)) }
+}
+
+impl<T, const N: usize> Default for HashSet<T, N> {
+    fn default() -> Self {
+        Self(InnerHashSet::<T, N>::new())
+    }
+}

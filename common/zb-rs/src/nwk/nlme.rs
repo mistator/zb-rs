@@ -1,5 +1,7 @@
+use alloc::sync::Arc;
+use crate::unwrap_or_return;
 use core::ops::Add;
-
+use core::sync::atomic::AtomicU8;
 use crate::apl::zdo::config::{ZbCapabilities};
 use crate::common::security::SecurityError;
 use crate::mac;
@@ -12,20 +14,19 @@ use crate::mac::mlme::MlmeStartRequest;
 use crate::mac::types::{MacError, MlmeAssociationError, PanDescriptorList, PollError, ScanError};
 use crate::mac::utils::calculate_duration;
 use crate::nwk::commands::Command;
-use crate::nwk::commands::leave::LeaveCmd;
-use crate::nwk::commands::network_status::NetworkStatusCode;
+use crate::nwk::commands::leave::{Leave};
+use crate::nwk::commands::network_status::NetworkStatus;
 use crate::nwk::commands::rejoin_request::RejoinRequestCmd;
 use crate::nwk::commands::rejoin_response::RejoinResponse;
-use crate::nwk::ctx::{NeighborRelationship, NewNwkNeighbour, NwkNeighbor};
-use crate::nwk::ctx::{BaseNwk, EndDevice, Initialized, Joined, Nwk, NwkTransitionResult, PendingRejoin, Router, TransitionError, TransitionResult, Uninitialized, Unjoined};
 use crate::nwk::frame::CommandFrame;
 use crate::nwk::frame::NwkFrame;
-use crate::nwk::nlde::NldeTransferError;
+use crate::nwk::nlde::{NldeTransferError};
 use crate::stack_profile::StackProfile;
 use bounded_integer::BoundedU16;
 use bounded_integer::BoundedU8;
 use byte_derive::TryRead;
 use byte_derive::TryWrite;
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_time::Duration;
 use embassy_time::Instant;
 use ieee802154::mac::beacon::SuperframeOrder;
@@ -34,12 +35,15 @@ use ieee802154::mac::command::CapabilityInformation;
 use thiserror::Error;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::BitStruct;
-use zb_types::common::Address;
 use zb_types::common::DeviceType;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
 use zb_types::common::PanId;
 use zb_types::mac::{Channel, ChannelMask, ChannelPage, MacAddress};
+use zb_types::transitions::{Either, TransitionError, TransitionResult};
+use crate::nwk::ctx::{BaseNwk, BaseNwkPrivate, InitializedNwk, JoinedAsEndDevice, JoinedAsRouter, Nwk, NwkTransitionResult, PendingJoin, RoutingState, Uninitialized, UnjoinedState};
+use crate::nwk::nib::{NeighborRelationship, NewNwkNeighbour, NwkNeighbor};
+use crate::nwk::service::routing::compute_routing_cost;
 
 pub type ScanDuration = BoundedU8<0, 0x0e>;
 pub type DistributedNwkAddress = BoundedU16<1, 0xfff7>;
@@ -127,7 +131,7 @@ impl NetworkDescriptor {
 
 pub type NetworkDiscoveryResult = Result<NlmeNetworkDiscoveryConfirm, NetworkDiscoveryError>;
 
-impl<T: Unjoined, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
+impl<T: UnjoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     // 3.2.2.3
     pub async fn network_discovery(&mut self, req: &ScanRequest<'_>) -> NetworkDiscoveryResult {
         let pds = self
@@ -179,12 +183,12 @@ impl<T: Unjoined, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         duration: ScanDuration,
         channel_masks: &[ChannelMask],
     ) -> Result<PanDescriptorList, ()> {
-        let intersections = get_intersections(&mut self.mac, channel_masks)?;
+        let intersections = get_intersections(&mut self.get_mac(), channel_masks)?;
 
         let mut pds = PanDescriptorList::new();
         for intersection in intersections {
             match self
-                .mac
+                .get_mac_mut()
                 .scan(MlmeScanRequest {
                     scan_type: MlmeScanType::Active,
                     channel_mask: intersection,
@@ -261,15 +265,15 @@ pub enum PermitJoiningError {
     InvalidRequest(&'static str),
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     // 3.2.2.7
     pub(crate) fn permit_joining(&mut self, cfg: PermitJoiningConfig) -> () {
         match cfg {
-            PermitJoiningConfig::Disabled => self.mac.set_association_permit_timeout(Instant::MIN),
-            PermitJoiningConfig::EnabledForPeriod(secs) => self.mac.set_association_permit_timeout(
+            PermitJoiningConfig::Disabled => self.get_mac_mut().set_association_permit_timeout(Instant::MIN),
+            PermitJoiningConfig::EnabledForPeriod(secs) => self.get_mac_mut().set_association_permit_timeout(
                 Instant::now().add(Duration::from_secs(secs.get() as u64)),
             ),
-            PermitJoiningConfig::Enabled => self.mac.set_association_permit_timeout(Instant::MAX),
+            PermitJoiningConfig::Enabled => self.get_mac_mut().set_association_permit_timeout(Instant::MAX),
         };
     }
 }
@@ -289,28 +293,18 @@ pub enum StartRouterError {
 }
 
 pub type StartRouterResult<D, S> =
-    TransitionResult<Nwk<Initialized<Joined<EndDevice>>, D, S>, Nwk<Initialized<Joined<Router>>, D, S>, StartRouterError>;
+    TransitionResult<Nwk<JoinedAsEndDevice, D, S>, Nwk<JoinedAsRouter, D, S>, StartRouterError>;
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<EndDevice>>, D, S> {
+impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
     // 3.2.2.9
     async fn start_router(mut self, req: StartRouterRequest) -> StartRouterResult<D, S> {
-        match self.mac.start(MlmeStartRequest {
+        match self.get_mac_mut().start(MlmeStartRequest {
             beacon_order: req.beacon_order,
             superframe_order: req.superframe_order,
             battery_life_extension: req.battery_life_extension,
             pan_coordinator_update: None,
         }) {
-            Ok(_) => {
-                let router = self.ctx.make_router();
-                Ok(Nwk::<Initialized<Joined<Router>>, D, S> {
-                    mac: self.mac,
-                    stg: self.stg,
-                    rng: self.rng,
-                    seq_number: self.seq_number,
-
-                    ctx: router,
-                })
-            }
+            Ok(_) => Ok(self.to_router()),
             Err(err) => Err(TransitionError {
                 state: self,
                 error: StartRouterError::from(err),
@@ -374,8 +368,7 @@ pub enum NlmeJoinError {
     TransferError(#[from] NldeTransferError),
 }
 
-pub type NlmeJoinResult<D, S> =
-    TransitionResult<Nwk<Uninitialized, D, S>, Nwk<Initialized<Joined<EndDevice>>, D, S>, NlmeJoinError>;
+pub type JoinResult<D, S> = TransitionResult<Nwk<Uninitialized, D, S>, Either<Nwk<JoinedAsEndDevice, D, S>, Nwk<JoinedAsRouter, D, S>>, NlmeJoinError>;
 
 pub struct NlmeAssociationJoinRequest {
     pub capability_information: ZbCapabilities,
@@ -387,7 +380,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Uninitialized, D, S> {
         mut self,
         nd: &NetworkDescriptor,
         req: NlmeAssociationJoinRequest,
-    ) -> NlmeJoinResult<D, S> {
+    ) -> JoinResult<D, S> {
         let extended_pan_id = nd.extended_pan_id;
         let capabilities = req.capability_information;
 
@@ -403,8 +396,8 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Uninitialized, D, S> {
                 continue;
             };
 
-            let (nwk_addr, ext_addr) = match self
-                .mac
+            let (_, ext_addr) = match self
+                .get_mac_mut()
                 .associate(parent.channel, parent.coord_address, capabilities.into())
                 .await
                 .map_err(|err| {
@@ -440,34 +433,11 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Uninitialized, D, S> {
                 rx_on_when_idle: true, // TODO
                 relationship: NeighborRelationship::Parent,
             });
-            nb.incoming_cost = parent.link_quality;
+            nb.incoming_cost = compute_routing_cost(/*parent.link_quality*/);
 
             log::info!("[NLME-JOIN] joined to network `{:?}` with parent: {:?}", extended_pan_id, nb);
 
-            return Ok(Nwk::<Initialized<Joined<EndDevice>>, D, S> {
-                mac: self.mac,
-                stg: self.stg,
-                rng: self.rng,
-                seq_number: self.seq_number,
-                ctx: Initialized {
-                    addr: nwk_addr,
-                    addr_map: Default::default(),
-                    ext_pan_id: extended_pan_id,
-                    group_table: Default::default(),
-                    pan_id: nd.pan_id,
-                    parent: nb,
-                    parent_information: Default::default(),
-                    profile: parent.zigbee_beacon.network_parameters.stack_profile,
-                    update_id: 0,
-                    active_key_seq_number: 0,
-                    all_fresh: false,
-                    security_material_set: Default::default(),
-                    route_request_counter: 0,
-                    ctx: Joined {
-                        ctx: EndDevice
-                    },
-                },
-            });
+            return Ok(self.to_joined(nb, parent.zigbee_beacon.network_parameters.stack_profile, capabilities));
         }
 
         Err(TransitionError {
@@ -485,9 +455,9 @@ pub struct NlmeRejoinRequest<'a> {
 }
 
 pub type RejoinResult<D, S> =
-    NwkTransitionResult<D, S, Initialized<PendingRejoin>, Initialized<Joined<EndDevice>>, NlmeJoinError>;
+    TransitionResult<Nwk<PendingJoin, D, S>, Either<Nwk<JoinedAsEndDevice, D, S>, Nwk<JoinedAsRouter, D, S>>, NlmeJoinError>;
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<PendingRejoin>, D, S> {
+impl<D: NwkMac, S: StorageRegion> Nwk<PendingJoin, D, S> {
     pub async fn rejoin(mut self, req: &NlmeRejoinRequest<'_>) -> RejoinResult<D, S> {
         let self_ieee_addr = self.get_ext_addr();
 
@@ -514,23 +484,17 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<PendingRejoin>, D, S> {
         log::info!("[NLME-REJOIN] pan descriptor identifier, rejoining network");
 
         let potential_parents = nd.get_potential_parents(false);
+        log::info!("[NLME-REJOIN] identified {} potential parents", potential_parents.len());
 
-        log::info!(
-            "[NLME-REJOIN] identified {} potential parents",
-            potential_parents.len()
-        );
         for parent in potential_parents {
             let (nwk_addr, ext_addr) =
                 //unwrap_or!(ctx.find_addresses(parent.coord_address), continue);
                 //TODO
                 (NwkAddress::default(), ExtendedAddress::default());
-            self.mac.set_channel(parent.channel).await;
-            self.mac.set_pan_id(parent.coord_pan_id.into()).await;
+            self.get_mac_mut().set_channel(parent.channel);
+            self.get_mac_mut().set_pan_id(parent.coord_pan_id.into());
 
-            log::info!(
-                "[NLME-REJOIN] sending rejoin command to parent: {:?}",
-                parent
-            );
+            log::info!("[NLME-REJOIN] sending rejoin command to parent: {:?}", parent);
             let rejoin_request = RejoinRequestCmd {
                 dest_short_addr: nwk_addr,
                 dest_ext_addr: ext_addr,
@@ -576,8 +540,6 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<PendingRejoin>, D, S> {
 
                 match rsp {
                     RejoinResponse::Success(nwk_addr) => {
-                        let ctx = &self.ctx;
-
                         let new_parent = NwkNeighbor::new(NewNwkNeighbour {
                             ext_addr: ieee_src,
                             nwk_addr: hdr.source,
@@ -588,30 +550,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<PendingRejoin>, D, S> {
                         // TODO: link cost
                         // TODO: NwkNeighbour builder
 
-                        return Ok(Nwk {
-                            mac: self.mac,
-                            stg: self.stg,
-                            rng: self.rng.clone(),
-                            seq_number: self.seq_number,
-                            ctx: Initialized {
-                                addr: nwk_addr,
-                                addr_map: Default::default(),
-                                ext_pan_id: req.ext_pan_id,
-                                group_table: Default::default(),
-                                pan_id: parent.coord_pan_id,
-                                parent: new_parent,
-                                parent_information: ctx.parent_information,
-                                profile: ctx.profile,
-                                update_id: 0,
-                                active_key_seq_number: ctx.active_key_seq_number,
-                                all_fresh: ctx.all_fresh,
-                                security_material_set: self.ctx.security_material_set,
-                                route_request_counter: 0,
-                                ctx: Joined {
-                                    ctx: EndDevice
-                                },
-                            },
-                        });
+                        return Ok(self.to_joined(new_parent, req.capability_information));
                     }
                     _ => continue,
                 }
@@ -643,17 +582,9 @@ pub enum DirectJoinError {
     NeighborTableFull,
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsRouter, D, S> {
     pub fn direct_join(&mut self, req: DirectJoinReq) -> Result<(), DirectJoinError> {
-        if self.get_router_ctx().children
-            .find_by_ext_addr(req.ext_addr)
-            .is_some()
-        {
-            return Err(DirectJoinError::AlreadyPresent);
-        }
-
         let nwk_addr = self.assign_child_address();
-        self.get_router_ctx_mut().children.cleanup();
 
         let child = NwkNeighbor::new(NewNwkNeighbour {
             ext_addr: req.ext_addr,
@@ -666,10 +597,14 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
             relationship: NeighborRelationship::Child,
         });
 
-        self.get_router_ctx_mut()
-            .children
-            .push(child)
-            .map_err(|_| DirectJoinError::NeighborTableFull)
+        self.lock_neighbors_mut(|nbs| {
+            if nbs.find_by_ext_addr(req.ext_addr).is_some() {
+                return Err(DirectJoinError::AlreadyPresent);
+            }
+
+            nbs.cleanup();
+            nbs.children.push(child).map_err(|_| DirectJoinError::NeighborTableFull)
+        })
     }
 }
 
@@ -688,24 +623,13 @@ pub enum NlmeLeaveError {
 
 pub type LeaveResult = Result<(), NlmeLeaveError>;
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<EndDevice>>, D, S> {
-    pub async fn leave(mut self, rejoin: bool) -> Nwk<Uninitialized, D, S> {
-        self.send_leave_cmd(
-            LeaveCmd {
-                request: None,
-                rejoin,
-                remove_children: false,
-            },
-        )
-        .await.ok();
-
-        Nwk {
-            mac: self.mac,
-            stg: self.stg,
-            rng: self.rng,
-            seq_number: self.seq_number,
-            ctx: Uninitialized,
-        }
+impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
+    pub async fn leave(&mut self, rejoin: bool) -> LeaveResult {
+        self.emit_leave_cmd(Leave {
+            rejoin,
+            request: false,
+            remove_children: false,
+        }, NwkAddress::BROADCAST_RX_ON_IDLE, None).await.map_err(NlmeLeaveError::from)
     }
 }
 
@@ -721,84 +645,36 @@ pub enum RouterLeaveReq {
     },
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
-    pub async fn leave(mut self, req: RouterLeaveReq) -> LeaveResult {
+impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsRouter, D, S> {
+    pub async fn leave(&mut self, req: RouterLeaveReq) -> LeaveResult {
         match req {
             RouterLeaveReq::RemoveSelf {
                 rejoin,
                 remove_children,
-            } => self.remove_self(rejoin, remove_children).await,
+            } => self.emit_leave_cmd(Leave {
+                request: false,
+                rejoin,
+                remove_children
+            }, NwkAddress::MAX, None).await,
             RouterLeaveReq::RemoveChild {
                 ext_addr,
-                remove_children,
                 rejoin,
+                remove_children,
             } => {
-                self.remove_child(Address::Extended(ext_addr), remove_children, rejoin)
-                    .await
-            }
-        }
-    }
+                let nwk_addr = self.lock_neighbors(|children| {
+                    children
+                        .find_by_ext_addr(ext_addr)
+                        .map(|nb| nb.nwk_addr)
+                });
+                let nwk_addr = unwrap_or_return!(nwk_addr, Err(NlmeLeaveError::UnknownDevice));
 
-    async fn remove_self(&mut self, remove_children: bool, rejoin: bool) -> LeaveResult {
-        self.send_leave_cmd(
-            LeaveCmd {
-                request: None,
-                rejoin,
-                remove_children,
-            },
-        )
-        .await?;
-
-        if remove_children {
-            let addresses = self.get_router_ctx()
-                .children
-                .iter()
-                .map(|n| n.nwk_addr.clone())
-                .collect::<zb_types::Vec<_, 32>>();
-            for addr in addresses {
-                self.remove_child(Address::Short(addr), remove_children, rejoin)
-                    .await
-                    .ok();
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn remove_child(
-        &mut self,
-        addr: Address,
-        remove_children: bool,
-        rejoin: bool,
-    ) -> LeaveResult {
-        let (nwk_addr, ext_addr, is_authenticated) = {
-            let child = match addr {
-                Address::Short(addr) => self.get_router_ctx_mut().children.find_by_short_addr(addr),
-                Address::Extended(addr) => self.get_router_ctx_mut().children.find_by_ext_addr(addr),
-            }
-            .ok_or(NlmeLeaveError::UnknownDevice)?;
-
-            (
-                child.nwk_addr,
-                child.ext_addr,
-                child.relationship == NeighborRelationship::Child,
-            )
-        };
-
-        let result = if is_authenticated {
-            self.send_leave_cmd(
-                LeaveCmd {
-                    request: Some((nwk_addr, ext_addr)),
+                self.emit_leave_cmd(Leave {
+                    request: false,
                     rejoin,
                     remove_children,
-                },
-            )
-            .await
-        } else {
-            Ok(())
-        };
-
-        result.map_err(NlmeLeaveError::from)
+                }, nwk_addr, Some(ext_addr)).await
+            }
+        }.map_err(|err| NlmeLeaveError::TransferError(err))
     }
 }
 
@@ -838,14 +714,14 @@ pub enum RouteError {
     #[error("invalid request: {0}")]
     InvalidRequest(&'static str),
     #[error("route error")]
-    RouteError(NetworkStatusCode),
+    RouteError(NetworkStatus),
     #[error("transfer error: {}", 0)]
     TransferError(#[from] NldeTransferError),
 }
 
 pub type RouteDiscoveryResult = Result<(), RouteError>;
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsRouter, D, S> {
     pub async fn route_discovery(&mut self, req: RouteDiscoveryReq) -> RouteDiscoveryResult {
         if let RouteDiscoveryAddress::Group(addr) | RouteDiscoveryAddress::Device(addr) =
             req.dst_addr
@@ -854,9 +730,9 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
                 return Err(RouteError::InvalidRequest("address must be unicast"));
             }
 
-            self.get_router_ctx_mut().route_table.cleanup();
-            if self.get_router_ctx_mut().route_table.is_full() {
-                return Err(RouteError::RouteError(NetworkStatusCode::NoRoutingCapacity));
+            self.get_route_table_mut().cleanup();
+            if self.get_route_table().is_full() {
+                return Err(RouteError::RouteError(NetworkStatus::NoRoutingCapacity));
             }
         }
 
@@ -866,7 +742,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
                     .await
             }
             RouteDiscoveryAddress::Group(addr) => {
-                if self.ctx.group_table.contains(&addr) {
+                if self.get_group_table().contains(&addr) {
                     return Ok(());
                 }
 

@@ -6,8 +6,8 @@ use zb_macros::BitStruct;
 use zb_types::common::{ExtendedAddress, NwkAddress};
 
 
-use crate::nwk::ctx::{BaseNwk};
-use crate::nwk::ctx::{Initialized, InitializedState, Nwk};
+use crate::nwk::ctx::{BaseNwk, InitializedNwk};
+use crate::nwk::ctx::{InitializedState, Nwk};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, TryRead, TryWrite)]
 #[repr(u8)]
@@ -91,7 +91,7 @@ pub struct NwkHeader {
 impl NwkHeader {
     #[builder]
     pub fn cmd<T: InitializedState, D: NwkMac, S: StorageRegion>(
-        #[builder(start_fn)] ctx: &mut Nwk<Initialized<T>, D, S>,
+        #[builder(start_fn)] ctx: &mut Nwk<T, D, S>,
         #[builder(default = true)] security: bool,
         destination: NwkAddress,
         destination_ieee: Option<ExtendedAddress>,
@@ -116,8 +116,34 @@ impl NwkHeader {
     }
 
     #[builder]
+    pub fn cmd_no_ctx(
+        #[builder(default = true)] security: bool,
+        source: NwkAddress,
+        source_ieee: ExtendedAddress,
+        destination: NwkAddress,
+        destination_ieee: Option<ExtendedAddress>,
+        // multicast_control: Option<MulticastControl>, Deprecated
+        source_route_subframe: Option<SourceRouteSubframe>,
+        sequence_number: u8,
+        radius: u8,
+    ) -> Self {
+        Self::new_no_ctx()
+            .frame_type(FrameType::NwkCommand)
+            .security(security)
+            .route_discovery(false)
+            .destination(destination)
+            .maybe_destination_ieee(destination_ieee)
+            .source(source)
+            .source_ieee(source_ieee)
+            .maybe_source_route_subframe(source_route_subframe)
+            .sequence_number(sequence_number)
+            .radius(radius)
+            .call()
+    }
+
+    #[builder]
     pub fn new<T: InitializedState, D: NwkMac, S: StorageRegion>(
-        #[builder(start_fn)] ctx: &mut Nwk<Initialized<T>, D, S>,
+        #[builder(start_fn)] ctx: &mut Nwk<T, D, S>,
         frame_type: FrameType,
         #[builder(default = true)] security: bool,
         #[builder(default = false)] route_discovery: bool,
@@ -129,6 +155,34 @@ impl NwkHeader {
         source: Option<NwkAddress>,
         sequence_number: Option<u8>,
         radius: Option<u8>,
+    ) -> Self {
+        Self::new_no_ctx()
+            .frame_type(frame_type)
+            .security(security)
+            .route_discovery(route_discovery)
+            .destination(destination)
+            .maybe_destination_ieee(destination_ieee)
+            .source(source.unwrap_or(ctx.get_addr()))
+            .maybe_source_ieee(source_ieee)
+            .maybe_source_route_subframe(source_route_subframe)
+            .radius(radius.unwrap_or(ctx.get_profile().nwk_max_depth * 2))
+            .sequence_number(sequence_number.unwrap_or(ctx.get_next_seq_number()))
+            .call()
+    }
+
+    #[builder]
+    pub fn new_no_ctx(
+        frame_type: FrameType,
+        #[builder(default = true)] security: bool,
+        #[builder(default = false)] route_discovery: bool,
+        destination: NwkAddress,
+        destination_ieee: Option<ExtendedAddress>,
+        source: NwkAddress,
+        source_ieee: Option<ExtendedAddress>,
+        // pub multicast_control: Option<MulticastControl>, Deprecated
+        source_route_subframe: Option<SourceRouteSubframe>,
+        radius: u8,
+        sequence_number: u8,
     ) -> Self {
         let control = FrameControl {
             frame_type,
@@ -149,9 +203,9 @@ impl NwkHeader {
 
         Self {
             destination,
-            source: source.unwrap_or_else(|| ctx.ctx.addr),
-            radius: radius.unwrap_or_else(|| ctx.ctx.get_profile().nwk_max_depth * 2),
-            sequence_number: sequence_number.unwrap_or_else(|| ctx.get_seq_number()),
+            source,
+            radius,
+            sequence_number,
             destination_ieee,
             source_ieee,
             multicast_control: None,

@@ -150,6 +150,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "byte-derive"
+version = "0.3.1"
+dependencies = [
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2265,7 +2275,7 @@ dependencies = [
  "bon",
  "bounded-integer",
  "byte",
- "byte-derive",
+ "byte-derive 0.3.1",
  "ccm 0.5.0",
  "ctr 0.9.2",
  "derive_more",
@@ -2291,7 +2301,7 @@ name = "zb-types"
 version = "0.1.0"
 dependencies = [
  "byte",
- "byte-derive",
+ "byte-derive 0.3.1",
  "cfg-if",
  "derive_more",
  "hashbrown",
@@ -2305,7 +2315,7 @@ name = "zb-zcl-clusters"
 version = "0.1.0"
 dependencies = [
  "byte",
- "byte-derive",
+ "byte-derive 0.3.0",
  "zb-macros",
  "zb-rs",
  "zb-types",

@@ -9,9 +9,9 @@ use zb_types::common::{ExtendedAddress, Key};
 pub mod frame;
 pub mod primitives;
 
-pub const TRUST_CENTER_LINK_KEY: Key = [
+pub const TRUST_CENTER_LINK_KEY: Key = Key::new([
     0x5a, 0x69, 0x67, 0x42, 0x65, 0x65, 0x41, 0x6c, 0x6c, 0x69, 0x61, 0x6e, 0x63, 0x65, 0x30, 0x39,
-];
+]);
 
 // AES-128 CCM with MIC32
 pub type Aes128Ccm<N> = Ccm<Aes128, N, U13>;

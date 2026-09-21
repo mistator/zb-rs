@@ -108,6 +108,7 @@ impl RawNwkFrame {
 
 pub enum MacIndication {
     Data(McpsDataIndication),
+    BeaconNotify(PanDescriptor),
     Associate(MlmeAssociateIndication),
     Poll(MlmePollIndication),
 }
@@ -117,7 +118,7 @@ pub struct McpsDataIndication {
     pub src_address: Option<MacAddress>,
     pub dest_address: Option<MacAddress>,
     pub link_quality: u8,
-    pub payload: zb_types::Vec<u8, A_MAX_MAC_PAYLOAD_SIZE>,
+    pub payload: Vec<u8, A_MAX_MAC_PAYLOAD_SIZE>,
     pub dsn: u8,
     // pub timestamp: 3 bytes
 }

@@ -1,27 +1,25 @@
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU8, Ordering};
 use crate::mac::constants::A_RESPONSE_WAIT_TIME;
-use crate::mac::types::{
-    MacError, MacIndication, McpsDataError, McpsDataIndication, MlmeAssociationError,
-    MlmeCommStatusError, PanDescriptor, PanDescriptorList, PollError, PollResult, ScanError,
-    SrcAddressMode,
-};
+use crate::mac::types::{MacError, MacIndication, McpsDataError, McpsDataIndication, MlmeAssociationError, MlmeCommStatusError, PanDescriptor, PanDescriptorList, PollError, PollResult, ScanError, SrcAddressMode};
 use crate::mac::utils::calculate_duration;
 use crate::mac::utils::calculate_scan_duration_max_us;
-use crate::nwk::nlme::ScanDuration;
+use crate::nwk::nlme::{ScanDuration};
 use crate::unwrap_or_return;
 use byte::BytesExt;
 use embassy_time::Instant;
 use embassy_time::WithTimeout;
 use embassy_time::{Duration};
 use ieee802154::mac;
-use ieee802154::mac::FrameType;
+use ieee802154::mac::{Address, FrameType};
 use ieee802154::mac::Header;
-use ieee802154::mac::beacon::BeaconOrder;
+use ieee802154::mac::beacon::{Beacon, BeaconOrder};
 use ieee802154::mac::beacon::SuperframeOrder;
 use ieee802154::mac::command::AssociationStatus;
 use ieee802154::mac::command::Command;
 use ieee802154::mac::security::SecurityContext;
 use thiserror::Error;
-use zb_hal::{Ieee802154Driver};
+use zb_hal::{Ieee802154Driver, LocalIeee802154Driver};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
 use zb_types::common::PanId;
@@ -29,6 +27,7 @@ use zb_types::mac::{
     A_MAX_MAC_PAYLOAD_SIZE, A_MAX_PHY_PACKET_SIZE,
     Channel, ChannelMask, MacAddress, MacCapabilities, MacFrame,
 };
+use zb_types::Vec;
 
 struct MacCommandConfig {
     pub frame_pending: bool,
@@ -78,14 +77,15 @@ pub struct MlmeScanRequest {
     pub duration: ScanDuration,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct Mlme<D>
 where
     D: Ieee802154Driver,
 {
     driver: D,
-    seq_number: u8,
+    seq_number: Arc<AtomicU8>,
     mac_association_permit_timeout: Instant,
+    extended_pan_id: Option<ExtendedAddress>,
 }
 
 impl<D> Mlme<D>
@@ -95,14 +95,14 @@ where
     pub fn new(driver: D) -> Self {
         Self {
             driver,
-            seq_number: 0,
+            extended_pan_id: None,
+            seq_number: Arc::new(AtomicU8::new(0)),
             mac_association_permit_timeout: Instant::MIN,
         }
     }
 
     fn sequence_number(&mut self) -> u8 {
-        self.seq_number = self.seq_number.wrapping_add(1);
-        self.seq_number
+        self.seq_number.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn is_rx_on_when_idle(&self) -> bool {
@@ -145,8 +145,8 @@ where
     ) -> Result<Option<PanDescriptorList>, MacError> {
         let frame = self.beacon_request_frame();
 
-        self.driver.flush().await;
-        self.driver.set_channel(channel).await;
+        self.driver.flush();
+        self.driver.set_channel(channel);
 
         self.driver
             .transmit(&frame)
@@ -242,28 +242,27 @@ where
         self.driver.transmit(&buf[..*offset]).await
     }
 
-    pub fn get_ext_addr(&self) -> ExtendedAddress {
-        self.driver.get_extended_address()
+    pub fn get_ext_addr(&self) -> ExtendedAddress { self.driver.get_extended_address() }
+    pub fn get_channel_mask(&self) -> ChannelMask { self.driver.get_channel_mask() }
+    pub fn get_channel(&self) -> Channel { self.driver.get_channel() }
+    pub fn get_pan_id(&self) -> Option<PanId> { self.driver.get_pan_id() }
+    pub fn set_pan_id(&mut self, pan_id: Option<PanId>) -> () { self.driver.set_pan_id(pan_id) }
+    pub fn get_extended_pan_id(&self) -> Option<ExtendedAddress> { self.extended_pan_id }
+    pub fn set_extended_pan_id(&mut self, ext_pan_id: Option<ExtendedAddress>) -> () {
+        self.extended_pan_id = ext_pan_id
     }
 
-    pub fn get_channel_mask(&self) -> ChannelMask {
-        self.driver.get_channel_mask()
+    pub fn set_channel(&mut self, channel: Channel) -> () {
+        self.driver.set_channel(channel)
     }
 
-    pub async fn set_pan_id(&mut self, pan_id: Option<PanId>) -> () {
-        self.driver.set_pan_id(pan_id).await
+    pub fn get_short_address(&self) -> Option<NwkAddress> { self.driver.get_short_address() }
+    pub fn set_short_address(&mut self, short_address: Option<NwkAddress>) -> () {
+        self.driver.set_short_address(short_address)
     }
 
-    pub async fn set_channel(&mut self, channel: Channel) -> () {
-        self.driver.set_channel(channel).await
-    }
-
-    pub async fn set_short_address(&mut self, short_address: Option<NwkAddress>) -> () {
-        self.driver.set_short_address(short_address).await
-    }
-
-    pub async fn poll_frame(&mut self) -> Option<MacIndication> {
-        let frame = self.driver.poll().await?;
+    pub fn poll_frame(&mut self) -> Option<MacIndication> {
+        let frame = self.driver.poll()?;
         self.filter_frame(frame)
     }
 
@@ -282,65 +281,70 @@ where
         let short_addr = self.driver.get_short_address();
         let ext_addr = self.get_ext_addr();
 
-        let pan_id_matches_self = |pan_id: mac::PanId| -> bool {
-            if self_pan_id.is_none() {
-                return false;
-            }
-
-            pan_id.0 == self_pan_id.unwrap().0
-        };
-
-        let pan_id_is_broadcast_or_matches_self = |pan_id: mac::PanId| -> bool {
-            pan_id == mac::PanId(0xffff) || pan_id_matches_self(pan_id)
-        };
-
-        match frame.header.frame_type {
-            FrameType::Beacon => {
-                let src = unwrap_or_return!(frame.header.source, None);
-
-                match self_pan_id {
-                    Some(pan_id) => {
-                        if pan_id != PanId::from(src.pan_id()) {
-                            return None;
-                        }
-                    }
-                    None => return None,
-                }
-            }
-            FrameType::Data | FrameType::MacCommand => {
-                if self_pan_id == None || frame.header.destination.is_none() {
+        // If a destination PAN identifier is included in the frame, it shall match macPANId or shall be the
+        // broadcast PAN identifier (0xffff).
+        match frame.header.destination.map(MacAddress::from) {
+            Some(MacAddress::Short(pan_id, _)) | Some(MacAddress::Extended(pan_id, _)) => {
+                if Some(pan_id) != self_pan_id && pan_id != PanId(0xffff).into() {
                     return None;
                 }
+            },
+            _ => {}
+        };
 
-                let dst = unwrap_or_return!(frame.header.destination, None);
-                if !pan_id_is_broadcast_or_matches_self(dst.pan_id()) {
-                    return None;
-                }
+        match frame {
+            // If the frame type indicates that the frame is a beacon frame, the source PAN identifier shall match
+            // macPANId unless macPANId is equal to 0xffff, in which case the beacon frame shall be accepted
+            // regardless of the source PAN identifier.
+            MacFrame {
+                header:
+                hdr @ Header {
+                    frame_type: FrameType::Beacon,
+                    source: Some(source),
+                    ..
+                },
+                content: mac::FrameContent::Beacon(beacon_content),
+                payload,
+                ..
+            } if self_pan_id.is_none() || Some(PanId::from(source.pan_id())) == self_pan_id => {
+                let pd = build_pan_descriptor()
+                    .source(source)
+                    .payload(payload)
+                    .beacon_content(beacon_content)
+                    .has_security(hdr.has_security())
+                    .channel(self.driver.get_channel())
+                    .call()?;
 
-                match MacAddress::from(dst) {
-                    MacAddress::Short(_, addr) => {
-                        if addr != NwkAddress::MAX && Some(addr) != short_addr {
-                            return None;
-                        }
-                    }
-                    MacAddress::Extended(_, addr) => {
-                        if addr != ExtendedAddress::MAX && addr != ext_addr {
-                            return None;
-                        }
-                    }
+                Some(MacIndication::BeaconNotify(pd))
+            },
+            MacFrame {
+                header: Header {
+                    frame_type: FrameType::Data | FrameType::MacCommand,
+                    destination: Some(dst),
+                    source,
+                    ..
+                },
+                payload,
+                ..
+            } => {
+                // If a short destination address is included in the frame, it shall match either macShortAddress or the
+                // broadcast address (0xffff). Otherwise, if an extended destination address is included in the frame, it
+                // shall match aExtendedAddress.
+                let dst = MacAddress::from(dst);
+                match dst {
+                    MacAddress::Short(_, addr) if Some(addr) != short_addr && addr != NwkAddress::MAX => None,
+                    MacAddress::Extended(_, addr) if addr != ext_addr.into() => None,
+                    _ => Some(MacIndication::Data(McpsDataIndication {
+                        src_address: source.map(MacAddress::from),
+                        dest_address: dst.into(),
+                        link_quality: 0,
+                        payload,
+                        dsn: 0,
+                    }))
                 }
             }
-            _ => return None,
+            _ => None,
         }
-
-        MacIndication::Data(McpsDataIndication {
-            src_address: frame.header.source.map(Into::into),
-            dest_address: frame.header.destination.map(Into::into),
-            link_quality: 0, // lqi,
-            payload: frame.payload,
-            dsn: 0,
-        })
-        .into()
     }
 
     pub async fn associate(
@@ -349,8 +353,8 @@ where
         coord_address: MacAddress,
         capability_information: MacCapabilities,
     ) -> Result<(NwkAddress, ExtendedAddress), MlmeAssociationError> {
-        self.driver.set_channel(channel).await;
-        self.driver.set_pan_id(coord_address.pan_id().into()).await;
+        self.driver.set_channel(channel);
+        self.driver.set_pan_id(coord_address.pan_id().into());
 
         self.send_mac_command(
             MacCommandConfig {
@@ -367,7 +371,7 @@ where
             MlmeAssociationError::InvalidParameter
         })?;
 
-        self.driver.flush().await;
+        self.driver.flush();
         self.mac_data_request(Some(coord_address))
             .await
             .map_err(|_| MlmeAssociationError::NoData)?;
@@ -389,7 +393,8 @@ where
 
         log::info!("[MLME-ASSOCIATE] success, short_addr={:?}", short_addr);
 
-        self.driver.set_short_address(Some(short_addr.into())).await;
+        self.driver.set_short_address(Some(short_addr.into()));
+        self.extended_pan_id = Some(ExtendedAddress::from(coordinator_extended_address));
         Ok((short_addr.into(), coordinator_extended_address.into()))
     }
 
@@ -494,12 +499,13 @@ where
         }
     }
 
-    pub async fn reset(&mut self, set_default_pib: bool) -> () {
-        self.driver.reset(set_default_pib).await;
+    pub fn reset(&mut self, set_default_pib: bool) -> () {
+        self.extended_pan_id = None;
+        self.driver.reset(set_default_pib);
     }
 
     pub async fn poll(&mut self, coord_address: MacAddress) -> Result<PollResult, PollError> {
-        self.driver.flush().await;
+        self.driver.flush();
         self.mac_data_request(Some(coord_address))
             .await
             .map_err(|_| PollError::ChannelAccessFailure)?;
@@ -546,28 +552,45 @@ fn parse_beacon(frame: MacFrame, channel: Channel) -> Option<PanDescriptor> {
         } => {
             log::debug!("[MLME-SCAN] received beacon frame");
 
-            let beacon = payload.as_slice()
-                .read_with(&mut 0, byte::LE)
-                .map_err(|err| {
-                    log::warn!("[MLME-SCAN] failed to parse zigbee beacon: {err:?}");
-                })
-                .ok()?;
-
-            Some(PanDescriptor {
-                channel,
-                coord_pan_id: source.pan_id().into(),
-                coord_address: source.into(),
-                superframe_spec: beacon_content.superframe_spec,
-                link_quality: 0, // lqi,
-                security_use: hdr.has_security(),
-                zigbee_beacon: beacon,
-            })
+            build_pan_descriptor()
+                .source(source)
+                .payload(payload)
+                .beacon_content(beacon_content)
+                .has_security(hdr.has_security())
+                .channel(channel)
+                .call()
         }
         other => {
             log::debug!("[MLME-SCAN] received non-beacon frame: {other:?}");
             None
         }
     }
+}
+
+#[bon::builder]
+fn build_pan_descriptor(
+    source: Address,
+    payload: Vec<u8, A_MAX_MAC_PAYLOAD_SIZE>,
+    beacon_content: Beacon,
+    has_security: bool,
+    channel: Channel
+) -> Option<PanDescriptor> {
+    let beacon = payload.as_slice()
+        .read_with(&mut 0, byte::LE)
+        .map_err(|err| {
+            log::warn!("[MLME-SCAN] failed to parse zigbee beacon: {err:?}");
+        })
+        .ok()?;
+
+    Some(PanDescriptor {
+        channel,
+        coord_pan_id: source.pan_id().into(),
+        coord_address: source.into(),
+        superframe_spec: beacon_content.superframe_spec,
+        link_quality: 0, // lqi,
+        security_use: has_security,
+        zigbee_beacon: beacon,
+    })
 }
 
 #[cfg(test)]

@@ -8,7 +8,6 @@ use crate::nwk::constants::MAX_ROUTE_REQUEST_JITTER;
 use crate::nwk::constants::MIN_ROUTE_REQUEST_JITTER;
 use crate::nwk::constants::ROUTE_REQUEST_RETRIES;
 use crate::nwk::constants::ROUTE_REQUEST_RETRY_INTERVAL;
-use crate::nwk::ctx::{Initialized, Joined, JoinedDevice, Nwk, Router};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nib::RouteStatus;
@@ -27,6 +26,8 @@ use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::BitStruct;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::nwk::commands::link_status::LinkCost;
+use crate::nwk::ctx::{BaseNwkPrivate, InitializedNwk, JoinedState, Nwk, RoutingState};
 
 #[derive(TryRead, TryWrite, PartialEq, Clone, Copy, Debug)]
 #[repr(u8)]
@@ -81,7 +82,7 @@ pub struct RouteRequestCmd {
     pub path_cost: u8,
 }
 
-impl<T: JoinedDevice, D: NwkMac, S: StorageRegion>Nwk<Initialized<Joined<T>>, D, S> {
+impl<T: JoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     // 3.4.1
     // The NWK layer may choose to buffer the received frame pending route discovery
     // or, if the frame is a unicast frame and the NIB attribute nwkUseTreeRouting
@@ -168,7 +169,7 @@ impl<T: JoinedDevice, D: NwkMac, S: StorageRegion>Nwk<Initialized<Joined<T>>, D,
     }
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     // 3.6.3.5.2
     // The spec implies that a route reply command shall be sent even if neither the
     // device nor any of its children is the route request destination. I believe
@@ -180,11 +181,11 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
         frame: &mut ReceivedCommandFrame<'_, RouteRequest>,
     ) -> () {
         // TODO: Move to task
-        async fn relay_route_request_cmd<D: NwkMac, S: StorageRegion>(
-            ctx: &mut Nwk<Initialized<Joined<Router>>, D, S>,
+        async fn relay_route_request_cmd<T: RoutingState, D: NwkMac, S: StorageRegion>(
+            ctx: &mut Nwk<T, D, S>,
             frame: &ReceivedCommandFrame<'_, RouteRequest>,
         ) {
-            let jitter = 2 * ctx.rng.random_range(
+            let jitter = 2 * ctx.get_rng().random_range(
                 MIN_ROUTE_REQUEST_JITTER.as_millis()..MAX_ROUTE_REQUEST_JITTER.as_millis(),
             );
 
@@ -218,60 +219,71 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
             return;
         }
 
-        let path_cost = if cmd.is_many_to_one() || self.ctx.get_profile().nwk_sym_link {
-            match self
-                .get_children()
-                .iter()
-                .find(|nb| nb.nwk_addr == frame.mac_src_addr)
-                .map(|nb| nb.outgoing_cost)
-                .unwrap_or(0)
+        let path_cost = if cmd.is_many_to_one() || self.get_profile().nwk_sym_link {
+            match self.lock_neighbors(|nbs|
+                nbs
+                    .children
+                    .iter()
+                    .find(|nb| nb.nwk_addr == frame.mac_src_addr)
+                    .map(|nb| nb.outgoing_cost)
+                    .unwrap_or_default())
             {
-                0 => return,
-                path_cost => max(path_cost, cmd.path_cost),
+                LinkCost::Unknown => return,
+                path_cost => max(path_cost as u8, cmd.path_cost),
             }
         } else {
             cmd.path_cost
         };
 
         let matches_self_or_children = (cmd.is_unicast()
-            && (self.ctx.addr == cmd.dst_addr
-            || self
-            .get_children()
-            .iter()
-            .find(|nb| nb.is_child() && nb.nwk_addr == cmd.dst_addr)
-            .is_some()))
+            && (self.get_addr() == cmd.dst_addr
+            || self.lock_neighbors(|nbs| nbs
+                .children
+                .iter()
+                .find(|nb| nb.is_child() && nb.nwk_addr == cmd.dst_addr)
+                .is_some())))
             || (cmd.is_multicast()
-            && self.ctx
-            .group_table
+            && self.get_group_table()
             .contains(&cmd.dst_addr));
 
-        self.cleanup_route_table();
+        self.get_route_table_mut().cleanup();
         if !self.has_routing_capacity() {
-            if self.ctx.get_profile().nwk_addr_alloc == AddrAllocMethod::Distributed
+            if self.get_profile().nwk_addr_alloc == AddrAllocMethod::Distributed
                 && cmd.is_unicast()
             {
-                let source_nb = unwrap_or_return!(
-                self.get_children()
-                    .iter()
-                    .find(|nb| nb.nwk_addr == frame.mac_src_addr)
-            );
+                let result = self.lock_neighbors(|nbs| {
+                    let source_nb = nbs
+                        .children
+                        .iter()
+                        .find(|nb| nb.nwk_addr == frame.mac_src_addr);
 
-                let originator_is_descendant = distributed_nwk_is_descendant(
-                    &self.ctx.get_profile(),
-                    0, // FIXME
-                    frame.originator_addr(),
-                    self.ctx.addr
-                );
-                if (source_nb.is_parent() && originator_is_descendant)
-                    || (source_nb.is_child() && !originator_is_descendant)
-                {
+                    if let Some(source_nb) = source_nb {
+                        let originator_is_descendant = distributed_nwk_is_descendant(
+                            &self.get_profile(),
+                            0, // FIXME
+                            frame.originator_addr(),
+                            self.get_addr()
+                        );
+                        if (source_nb.is_parent() && originator_is_descendant)
+                            || (source_nb.is_child() && !originator_is_descendant)
+                        {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+
+                     true
+                });
+
+                if !result {
                     return;
                 }
 
                 if matches_self_or_children {
                     self.send_route_reply_cmd(frame, path_cost).await.ok();
                 } else {
-                    frame.cmd.path_cost += compute_routing_cost();
+                    frame.cmd.path_cost += compute_routing_cost() as u8;
                     // TODO: forward route request
                 }
             } else {
@@ -283,15 +295,15 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
             // 2. Find or create (active) reverse route entry (if nwk_sym_link is true)
 
             // TODO: Should we add a discovery entry here?
-            if cmd.is_many_to_one() || self.ctx.get_profile().nwk_sym_link {
+            if cmd.is_many_to_one() || self.get_profile().nwk_sym_link {
                 // Add active route to source
                 let key = RouteEntryKey::new(
-                    self.ctx.get_profile(),
+                    self.get_profile(),
                     frame.originator_addr(),
                     false,
                 );
                 unwrap_or_return!(
-                self.get_router_ctx_mut().route_table
+                self.get_route_table_mut()
                     .entry(key)
                     .and_modify(|route| {
                         route.status = RouteStatus::Active;
@@ -318,12 +330,12 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
                 // Add route and discovery entries to destination if the device or any of its
                 // children is not the destination
                 let key = RouteEntryKey::new(
-                    self.ctx.get_profile(),
+                    self.get_profile(),
                     cmd.dst_addr,
                     cmd.is_multicast(),
                 );
                 let route = unwrap_or_return!(
-                self.get_router_ctx_mut().route_table
+                self.get_route_table_mut()
                     .entry(key)
                     .and_modify(|route| {
                         if !matches!(
@@ -345,7 +357,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
                     .ok()
             );
 
-                let new_path_cost = path_cost + compute_routing_cost();
+                let new_path_cost = path_cost + compute_routing_cost() as u8;
                 let key = (cmd.route_request_id, frame.originator_addr());
                 unwrap_or_return!(
                 route

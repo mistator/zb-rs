@@ -114,6 +114,41 @@ pub enum Channel {
     Channel26,
 }
 
+impl From<u8> for Channel {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Channel::Channel0,
+            1 => Channel::Channel1,
+            2 => Channel::Channel2,
+            3 => Channel::Channel3,
+            4 => Channel::Channel4,
+            5 => Channel::Channel5,
+            6 => Channel::Channel6,
+            7 => Channel::Channel7,
+            8 => Channel::Channel8,
+            9 => Channel::Channel9,
+            10 => Channel::Channel10,
+            11 => Channel::Channel11,
+            12 => Channel::Channel12,
+            13 => Channel::Channel13,
+            14 => Channel::Channel14,
+            15 => Channel::Channel15,
+            16 => Channel::Channel16,
+            17 => Channel::Channel17,
+            18 => Channel::Channel18,
+            19 => Channel::Channel19,
+            20 => Channel::Channel20,
+            21 => Channel::Channel21,
+            22 => Channel::Channel22,
+            23 => Channel::Channel23,
+            24 => Channel::Channel24,
+            25 => Channel::Channel25,
+            26 => Channel::Channel26,
+            _ => { panic!("invalid channel received") }
+        }
+    }
+}
+
 impl Channel {
     pub const ALL: [Channel; 27] = [
         Channel::Channel0,
@@ -144,6 +179,10 @@ impl Channel {
         Channel::Channel25,
         Channel::Channel26,
     ];
+
+    pub fn as_channel_mask(&self) -> ChannelMask {
+        ChannelMask::new(ChannelPage::ChannelPage0, &[*self])
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, TryRead, TryWrite)]

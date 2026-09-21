@@ -1,5 +1,5 @@
 use crate::apl::aps::apsde::ApsdeDataIndication;
-use crate::apl::aps::security::types::indications::ApsmeConfirmKeyIndication;
+use crate::apl::aps::security::types::indications::{ApsmeConfirmKeyIndication, ApsmeRemoveDeviceIndication};
 use crate::apl::aps::security::types::indications::ApsmeTransportKeyIndication;
 use crate::apl::aps::security::types::indications::ApsmeUpdateDeviceIndication;
 use bounded_integer::BoundedU8;
@@ -7,6 +7,7 @@ use byte::ctx::Endian;
 use byte::{BytesExt, TryRead, TryWrite};
 use zb_macros::try_write_impl;
 use zb_types::common::NwkAddress;
+use crate::nwk::nlde::NlmeLeaveIndication;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SrcAddrMode {
@@ -106,7 +107,9 @@ impl TryWrite<Endian> for &ApsEndpoint {
 #[derive(Clone, Debug)]
 pub enum ApsIndication {
     Data(ApsdeDataIndication),
+    Leave(NlmeLeaveIndication),
     TransportKey(ApsmeTransportKeyIndication),
     UpdateDevice(ApsmeUpdateDeviceIndication),
     ConfirmKey(ApsmeConfirmKeyIndication),
+    RemoveDevice(ApsmeRemoveDeviceIndication)
 }

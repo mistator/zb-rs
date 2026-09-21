@@ -84,10 +84,11 @@ pub struct NlmeJoinIndication {
     pub(crate) join_method: JoinMethod,
 }
 
-#[derive(Debug)]
-pub struct NlmeLeaveIndication {
-    pub device_address: Option<ExtendedAddress>,
-    pub rejoin: bool,
+#[derive(Copy, Clone, Debug)]
+pub enum NlmeLeaveIndication {
+    LeaveSelf { rejoin: bool },
+    LeaveChild { rejoin: bool, addr: NwkAddress },
+    LeaveParent { rejoin: bool }
 }
 
 type NlmeNetworkStatusIndication = NetworkStatus;

@@ -17,8 +17,10 @@ pub const MAX_BROADCAST_JITTER: Duration = from_octets(MAX_BROADCAST_JITTER_OCTE
 pub const INITIAL_ROUTE_REQUEST_RETRIES: u8 = 3;
 pub const ROUTE_REQUEST_RETRIES: u8 = 2;
 pub const ROUTE_REQUEST_RETRY_INTERVAL: Duration = Duration::from_millis(0xfe);
-pub const MIN_ROUTE_REQUEST_JITTER: Duration = Duration::from_millis(2);
-pub const MAX_ROUTE_REQUEST_JITTER: Duration = Duration::from_millis(128);
+pub const MIN_ROUTE_REQUEST_JITTER_MILLIS: usize = 2;
+pub const MAX_ROUTE_REQUEST_JITTER_MILLIS: usize = 128;
+pub const MIN_ROUTE_REQUEST_JITTER: Duration = Duration::from_millis(MIN_ROUTE_REQUEST_JITTER_MILLIS as u64);
+pub const MAX_ROUTE_REQUEST_JITTER: Duration = Duration::from_millis(MAX_ROUTE_REQUEST_JITTER_MILLIS as u64);
 pub const MAC_FRAME_OVERHEAD: u8 = 0x0b;
 
 pub const MAX_NWK_PAYLOAD_SIZE: usize = A_MAX_MAC_PAYLOAD_SIZE - MIN_HEADER_OVERHEAD;

@@ -188,7 +188,7 @@ impl<'a> TryRead<'a, ctx::Endian> for UserDescriptor {
 
 #[try_write_impl]
 impl TryWrite<ctx::Endian> for &UserDescriptor {
-    fn try_write(self, bytes: &mut [u8], __: ctx::Endian) -> byte::Result<usize> {
+    fn try_write(self, bytes: &mut [u8], _ctx: ctx::Endian) -> byte::Result<usize> {
         Ok(self.0.try_write(bytes, ())?)
     }
 }

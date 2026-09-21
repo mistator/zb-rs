@@ -3,9 +3,17 @@ use core::fmt;
 use crate::mac::MacDeviceType;
 use byte_derive::TryRead;
 use byte_derive::TryWrite;
+use derive_more::Deref;
 use ieee802154::mac;
 
-pub type Key = [u8; 16];
+#[derive(Copy, Clone, Default, Debug, Deref, PartialEq, TryRead, TryWrite)]
+pub struct Key([u8; 16]);
+
+impl Key {
+    pub const fn new(key: [u8; 16]) -> Self { Self(key) }
+
+    pub fn as_array(&self) -> &[u8; 16] { &self.0 }
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, TryRead, TryWrite)]
 #[repr(u8)]
@@ -57,7 +65,7 @@ impl fmt::Debug for PanId {
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq, TryRead, TryWrite, PartialOrd, Ord)]
+#[derive(Clone, Copy, Deref, Eq, Hash, PartialEq, TryRead, TryWrite, PartialOrd, Ord)]
 pub struct NwkAddress(pub u16);
 
 impl From<u16> for NwkAddress {

@@ -12,7 +12,7 @@ use crate::apl::aps::constants::PARENT_ANNOUNCE_BASE_TIMER_SECONDS;
 use crate::apl::aps::constants::PARENT_ANNOUNCE_JITTER_MAX_SECONDS;
 use crate::apl::aps::types::{ApsEndpoint, ApsIndication};
 use crate::apl::zb_application::{ZbApplication};
-use crate::apl::zdo::{JoinedCtx, ZbNode};
+use crate::apl::zdo::{EndDeviceNodeCtx, ZbNode, ZbNodeJoinedStatus};
 use crate::apl::zdp::ZDP_ENDPOINT;
 use crate::apl::zdp::ZDP_PROFILE;
 use crate::apl::zdp::types::TransactionData;
@@ -45,12 +45,14 @@ use crate::apl::zdp::types::discovery::SystemServerDiscoveryRsp;
 use crate::apl::zdp::types::network::MgmtPermitJoiningReq;
 use crate::apl::zdp::types::network::MgmtPermitJoiningRsp;
 use crate::common::bytes::WithLength;
-use crate::nwk::ctx::{NwkJoined, NwkNeighbor};
 use crate::zcl::cluster::types::ClusterType;
-use zb_hal::StorageRegion;
+use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::DeviceType;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::apl::aps::ctx::{ApsListen, ApsTransmit, Apsme};
+use crate::nwk::ctx::{BaseNwk, BaseNwkPrivate, InitializedNwk, JoinedNwk, JoinedState, Nwk};
+use crate::nwk::nib::NwkNeighbor;
 
 pub type ApsdeResult = Result<ApsdeSapConfirm, ApsdeError>;
 pub type OptionalApsdeResult = Result<Option<ApsdeSapConfirm>, ApsdeError>;
@@ -94,21 +96,22 @@ async fn get_descriptor_for_endpoint(endpoint: ApsEndpoint, value: &ZbApplicatio
         application_output_cluster_list: output_clusters,
     }
 }
-impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
+
+impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
     fn get_status_and_neighbours(
         &mut self,
         addr: NwkAddress,
     ) -> StatusResult {
-        if addr == self.ctx.aps.nwk.get_addr() {
-            StatusResult::ThisDevice(addr)
-        } else if let Some(children) = self.ctx.aps.nwk.get_children() {
-            match children.iter().find(|item| item.nwk_addr == addr) {
+        if addr == self.ctx.get_nwk().get_addr() {
+            return StatusResult::ThisDevice(addr);
+        }
+
+        self.ctx.get_nwk().lock_neighbors(|nbs| {
+            match nbs.children.iter().find(|item| item.nwk_addr == addr) {
                 Some(neighbour) => StatusResult::Neighbour(neighbour.clone()),
                 None => StatusResult::DeviceNotFound,
             }
-        } else {
-            StatusResult::InvRequestType
-        }
+        })
     }
 
     fn handle_extended_addr_request(
@@ -116,27 +119,25 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
         start_index: u8,
         rsp: &mut AddrRsp,
     ) -> () {
-        let addr = self.ctx.aps.nwk.get_addr();
-        let ext_addr = self.ctx.aps.nwk.get_ext_addr();
+        let addr = self.ctx.get_nwk().get_addr();
+        let ext_addr = self.ctx.get_nwk().get_ext_addr();
 
-        if let Some(children) = self.ctx.aps.nwk.get_children() {
-            rsp.status = AddrRspStatus::Success;
-            rsp.nwk_addr = addr;
-            rsp.ieee_addr = ext_addr;
-
-            let matches = children
+        let matches = self.ctx.get_nwk().lock_neighbors(|nbs| {
+            nbs
+                .children
                 .iter()
                 .filter(|item| item.device_type == DeviceType::EndDevice)
                 .skip(start_index as usize)
                 .map(|item| item.nwk_addr.get_value())
-                .collect::<zb_types::Vec<u16, 255>>();
+                .collect::<zb_types::Vec<u16, 255>>()
+        });
 
-            rsp.num_assoc = Some(matches.len() as u16);
-            rsp.start_index = Some(start_index);
-            rsp.nwk_addr_assoc_dev_list = Some(matches);
-        } else {
-            rsp.status = AddrRspStatus::InvRequestType;
-        }
+        rsp.status = AddrRspStatus::Success;
+        rsp.nwk_addr = addr;
+        rsp.ieee_addr = ext_addr;
+        rsp.num_assoc = Some(matches.len() as u16);
+        rsp.start_index = Some(start_index);
+        rsp.nwk_addr_assoc_dev_list = Some(matches);
     }
 
     async fn transmit_zdp_command(
@@ -146,14 +147,14 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
         sequence_number: Option<u8>,
     ) -> ApsdeResult {
         let cluster_id = transaction_data.discriminant();
-        let sequence_number = sequence_number.unwrap_or(self.get_zcl_transaction_number());
+        let sequence_number = sequence_number.unwrap_or(self.ctx.get_zcl_transaction_number());
 
         let cmd = ZdpCommand {
             transaction_sequence_number: sequence_number,
             transaction_data,
         };
 
-        self.ctx.aps.aps_data_request(
+        self.ctx.get_aps_mut().aps_data_request(
             ApsdeRequest {
                 dst_address: dst,
                 profile_id: ZDP_PROFILE,
@@ -246,7 +247,7 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
             ..Default::default()
         };
 
-        match self.ctx.aps.nwk.find_nwk_addr(&req.ieee_address) {
+        match self.ctx.get_nwk().find_nwk_addr(req.ieee_address) {
             None => {
                 self.handle_addr_request_no_matches(
                     indication,
@@ -288,11 +289,11 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
         let mut rsp = AddrRsp {
             status: AddrRspStatus::DeviceNotFound,
             ieee_addr: ExtendedAddress::MAX,
-            nwk_addr: self.ctx.aps.nwk.get_addr(),
+            nwk_addr: self.ctx.get_nwk().get_addr(),
             ..Default::default()
         };
 
-        match self.ctx.aps.nwk.find_ext_addr(&addr) {
+        match self.ctx.get_nwk().find_ext_addr(addr) {
             None => {
                 self.handle_addr_request_no_matches(
                     indication,
@@ -534,7 +535,7 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
         }
 
         let addr = req.nwk_addr_of_interest;
-        let local_addr = self.ctx.aps.nwk.get_addr();
+        let local_addr = self.ctx.get_nwk().get_addr();
 
         let mut rsp = MatchDescRsp {
             status: DescRspStatus::InvRequestType,
@@ -542,7 +543,7 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
             match_list: Default::default(),
         };
 
-        if self.ctx.aps.nwk.is_end_device() && addr != local_addr && !addr.is_broadcast() {
+        if self.ctx.get_nwk().is_end_device() && addr != local_addr && !addr.is_broadcast() {
             return if indication.dst.is_broadcast() {
                 Ok(None)
             } else {
@@ -564,44 +565,42 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
                     rsp.match_list.push(ep).unwrap();
                 }
             }
-        } else if let Some(children) = self.ctx.aps.nwk.get_children() {
-            return match children
-                .iter()
-                .find(|item| item.device_type == DeviceType::EndDevice && item.nwk_addr == addr)
-            {
-                Some(item) => {
-                    for (ep, desc) in &item.simple_descriptors {
-                        if descriptor_matches_request(desc, req) {
-                            rsp.match_list.push(*ep).unwrap();
+        } else {
+            self.ctx.get_nwk().lock_neighbors(|nbs| {
+                match nbs
+                    .children
+                    .iter()
+                    .find(|item| item.device_type == DeviceType::EndDevice && item.nwk_addr == addr)
+                {
+                    Some(child) => {
+                        for (ep, desc) in &child.simple_descriptors {
+                            if descriptor_matches_request(desc, req) {
+                                rsp.match_list.push(*ep).unwrap();
+                            }
                         }
-                    }
 
-                    rsp.status = if rsp.match_list.len() > 0 {
-                        DescRspStatus::Success
-                    } else {
-                        DescRspStatus::NoDescriptor
-                    };
-                    to_optional(
-                        self.transmit_zdp_command(
-                            indication.src,
-                            TransactionData::MatchDescRsp(rsp),
-                            seq_number.into(),
-                        )
-                            .await,
+                        rsp.status = if rsp.match_list.len() > 0 {
+                            DescRspStatus::Success
+                        } else {
+                            DescRspStatus::NoDescriptor
+                        };
+                    }
+                    None => {
+                        rsp.status = DescRspStatus::DeviceNotFound;
+                    }
+                };
+            });
+
+            if self.ctx.get_nwk().is_router() {
+                return to_optional(
+                    self.transmit_zdp_command(
+                        indication.src,
+                        TransactionData::MatchDescRsp(rsp),
+                        seq_number.into(),
                     )
-                }
-                None => {
-                    rsp.status = DescRspStatus::DeviceNotFound;
-                    to_optional(
-                        self.transmit_zdp_command(
-                            indication.src,
-                            TransactionData::MatchDescRsp(rsp),
-                            seq_number.into(),
-                        )
-                            .await,
-                    )
-                }
-            };
+                        .await,
+                );
+            }
         }
 
         if rsp.match_list.len() == 0 && addr.is_broadcast() {
@@ -640,30 +639,25 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
         req: &DeviceAnnce,
         indication: &ApsdeDataIndication,
     ) -> OptionalApsdeResult {
-        if let Some(children) = self.ctx.aps.nwk.get_children() {
-            if children
-                .find_by_ext_addr_and_type(req.ieee_addr, DeviceType::EndDevice)
-                .is_some()
-                && indication.dst.is_broadcast()
-            {
+        match self.ctx.get_nwk().lock_neighbors(|nbs| {
+            nbs.find_by_ext_addr_and_type(req.ieee_addr, DeviceType::EndDevice).is_some() && indication.dst.is_broadcast()
+        }) {
+            true => {
                 if let ApsdeAddress::Group(addr) = indication.src {
-                    if self.ctx.aps.nwk
+                    if self.ctx.get_nwk()
                         .get_broadcast_transaction_table()
-                        .unwrap()
                         .iter()
                         .find(|rec| rec.source_address == addr) // TODO: Check how to get the NKW frame's sequence number here
                         .is_none()
                     {
-                        self.ctx.aps.nwk.get_children_mut()
-                            .unwrap()
-                            .retain(|nb| nb.ext_addr != Some(req.ieee_addr));
+                        self.ctx.get_nwk_mut().lock_neighbors_mut(|nbs| {
+                            nbs.children.retain(|nb| nb.ext_addr != Some(req.ieee_addr))
+                        });
                     }
                 }
-            } else {
-                self.ctx.aps.nwk.get_addr_map_mut()
-                    .insert(req.nwk_addr, req.ieee_addr);
             }
-        }
+            false => self.ctx.get_nwk_mut().get_addr_map_mut().insert(req.nwk_addr, req.ieee_addr),
+        };
 
         Ok(None)
     }
@@ -672,8 +666,8 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
         &mut self,
     ) -> ApsdeResult {
         let annce = DeviceAnnce {
-            nwk_addr: self.ctx.aps.nwk.get_addr(),
-            ieee_addr: self.ctx.aps.nwk.get_ext_addr(),
+            nwk_addr: self.ctx.get_nwk().get_addr(),
+            ieee_addr: self.ctx.get_nwk().get_ext_addr(),
             capability: self.config.get_capabilities(),
         };
 
@@ -697,8 +691,9 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
             children: Default::default(),
         };
 
-        if let Some(children) = self.ctx.aps.nwk.get_children() {
-            rsp.children = children
+        match self.ctx.get_nwk().lock_neighbors(|nbs| {
+            rsp.children = nbs
+                .children
                 .iter()
                 .filter(|item| item.ext_addr.is_some())
                 .filter(|item| {
@@ -709,15 +704,14 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
                 .map(|item| item.ext_addr.unwrap())
                 .collect::<zb_types::Vec<ExtendedAddress, 32>>();
 
-            if rsp.children.len() == 0 {
-                return Ok(None);
-            }
-        } else {
-            return Ok(None)
+            rsp.children.len()
+        }) {
+            0 => return Ok(None),
+            _ => {}
         }
 
-        let jitter = self.ctx.aps.nwk.get_rng().random_range(0.0..PARENT_ANNOUNCE_JITTER_MAX_SECONDS);
-        self.ctx.aps.parent_announce_timer = PARENT_ANNOUNCE_BASE_TIMER_SECONDS + jitter;
+        let jitter = self.ctx.get_nwk_mut().get_rng().random_range(0.0..PARENT_ANNOUNCE_JITTER_MAX_SECONDS);
+        self.ctx.get_aps_mut().set_parent_announce_timer(PARENT_ANNOUNCE_BASE_TIMER_SECONDS + jitter);
 
         to_optional(
             self.transmit_zdp_command(
@@ -771,7 +765,7 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
             .await?;
 
         let timeout = Duration::from_secs(1);
-        self.ctx.aps.wait_for_indication(timeout, |indication| {
+        self.ctx.get_aps_mut().wait_for_indication(timeout, |indication| {
             return match indication {
                 ApsIndication::Data(ApsdeDataIndication {
                                         profile_id: 0,
@@ -807,7 +801,7 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
             return Ok(None);
         }
 
-        let status = match self.ctx.aps.bind_request(*binding) {
+        let status = match self.ctx.get_aps_mut().bind_request(*binding) {
             Ok(_) => BindStatus::Success,
             Err(err) => match err {
                 ApsmeBindError::TableFull => BindStatus::TableFull,
@@ -834,7 +828,7 @@ impl<N: NwkJoined, S: StorageRegion> ZbNode<JoinedCtx<N, S>, S> {
             return Ok(None);
         }
 
-        let status = match self.ctx.aps.unbind_request(*binding) {
+        let status = match self.ctx.get_aps_mut().unbind_request(*binding) {
             Ok(_) => UnbindStatus::Success,
             Err(err) => match err {
                 ApsmeUnbindError::IllegalRequest => UnbindStatus::NotAuthorized,

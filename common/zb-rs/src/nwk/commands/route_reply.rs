@@ -6,7 +6,6 @@ use crate::nwk::commands::Command;
 use crate::nwk::commands::route_request::RouteRequest;
 use crate::nwk::constants::ROUTE_DISCOVERY_TIME;
 use crate::nwk::constants::WAIT_BEFORE_VALIDATION;
-use crate::nwk::ctx::{Initialized, Joined, Nwk, Router};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nib::RouteStatus;
@@ -21,6 +20,7 @@ use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::BitStruct;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::nwk::ctx::{InitializedNwk, Nwk, RoutingState};
 
 #[derive(BitStruct, Clone, Copy, Debug)]
 #[bit_struct(repr = u8)]
@@ -44,7 +44,7 @@ pub struct RouteReply {
     pub responder_ieee_address: Option<ExtendedAddress>,
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S>  {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S>  {
     pub async fn send_route_reply_cmd(
         &mut self,
         route_request: &ReceivedCommandFrame<'_, RouteRequest>,
@@ -60,9 +60,9 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S>  {
             .find_ext_addr(route_request.cmd.destination_address);
             TODO
          */
-        let responder_ext_addr = self.get_router_ctx_mut().children
-            .find_by_short_addr(route_request.cmd.dst_addr)
-            .map(|nb| nb.ext_addr.unwrap());
+        let responder_ext_addr = self.lock_neighbors(|children|
+            children.find_by_short_addr(route_request.cmd.dst_addr)
+                .map(|nb| nb.ext_addr.unwrap()));
 
         let cmd = Command::RouteReply(RouteReply {
             command_options: CommandOptions {
@@ -73,7 +73,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S>  {
             route_request_id: route_request.cmd.route_request_id,
             originator_address: route_request.originator_addr(),
             responder_address: route_request.cmd.dst_addr,
-            path_cost: path_cost + compute_routing_cost(),
+            path_cost: path_cost + compute_routing_cost() as u8,
             originator_ieee_address: route_request.originator_ieee_addr(),
             responder_ieee_address: responder_ext_addr,
         });
@@ -117,9 +117,9 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S>  {
             }
         }
 
-        self.get_router_ctx_mut().route_table.cleanup();
-        if self.get_router_ctx_mut().route_table.is_full() {
-            if self.ctx.get_profile().nwk_use_tree_routing {
+        self.get_route_table_mut().cleanup();
+        if self.get_route_table().is_full() {
+            if self.get_profile().nwk_use_tree_routing {
                 // TODO: send the route reply as though it were a data frame being
                 // forwarded using tree routing
             } else {
@@ -128,15 +128,15 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S>  {
             }
         }
 
-        let slf_addr = self.ctx.addr;
+        let slf_addr = self.get_addr();
 
         let key = RouteEntryKey::new(
-            &self.ctx.get_profile(),
+            &self.get_profile(),
             cmd.responder_address,
             cmd.command_options.multicast,
         );
         let discovery_key = (cmd.route_request_id, cmd.originator_address);
-        let route = unwrap_or_return!(self.get_router_ctx_mut().route_table.get_mut(&key));
+        let route = unwrap_or_return!(self.get_route_table_mut().get_mut(&key));
         if !route.discovery.contains_key(&discovery_key) {
             return;
         }
@@ -160,6 +160,6 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S>  {
             update_next_hop(route, discovery_key, frame);
         }
 
-        frame.cmd.path_cost += compute_routing_cost();
+        frame.cmd.path_cost += compute_routing_cost() as u8;
     }
 }

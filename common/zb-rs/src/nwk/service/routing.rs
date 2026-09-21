@@ -2,10 +2,8 @@ use crate::common::information_base::RouteDiscoveryEntry;
 use crate::common::information_base::RouteEntry;
 use crate::common::information_base::RouteEntryKey;
 use crate::nwk::commands::network_status::NetworkStatusCmd;
-use crate::nwk::commands::network_status::NetworkStatusCode;
+use crate::nwk::commands::network_status::NetworkStatus;
 use crate::nwk::commands::route_request::RouteRequestCmd;
-use crate::nwk::ctx::BaseNwk;
-use crate::nwk::ctx::{EndDevice, Initialized, InitializedState, Joined, JoinedDevice, Nwk, Router};
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nib::RouteStatus;
 use crate::nwk::nlme::RouteError;
@@ -15,28 +13,27 @@ use rand::RngExt;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
+use crate::nwk::commands::link_status::LinkCost;
+use crate::nwk::ctx::{BaseNwk, BaseNwkPrivate, InitializedNwk, InitializedState, JoinedAsEndDevice, JoinedState, Nwk, RoutingState};
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     pub fn assign_child_address(&mut self) -> NwkAddress {
-        match self.ctx.get_profile().nwk_addr_alloc {
+        match self.get_profile().nwk_addr_alloc {
             AddrAllocMethod::Stochastic => loop {
-                let addr = NwkAddress(self.rng.random_range(1..NwkAddress::MAX_NON_BROADCAST.0));
+                let addr = NwkAddress(self.get_rng().random_range(1..NwkAddress::MAX_NON_BROADCAST.0));
 
-                if self.ctx.addr == addr
-                    || self.get_router_ctx()
-                        .route_table
+                if self.get_addr() == addr
+                    || self.get_route_table()
                         .iter()
                         .any(|(_, entry)| entry.next_hop_addr == addr)
-                    || self.get_router_ctx()
-                        .route_record_table
+                    || self.get_route_record_table()
                         .iter()
                         .any(|item| item.network_address == addr || item.path.contains(&addr))
-                    || self.get_router_ctx()
-                        .broadcast_transaction_table
+                    || self.get_broadcast_transaction_table()
                         .iter()
                         .any(|item| item.source_address == addr)
-                    || self.get_router_ctx_mut().children.find_by_short_addr(addr).is_some()
-                    || (*self.ctx.addr_map).contains_key(&addr)
+                    || self.lock_neighbors(|children| children.find_by_short_addr(addr).is_some())
+                    || (*self.get_addr_map()).contains_key(&addr)
                 {
                     continue;
                 }
@@ -90,26 +87,26 @@ pub(crate) const fn distributed_nwk_is_descendant(
     parent + c_skip(ctx, depth - 1) > child && child > parent
 }
 
-impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S> {
+impl<T: JoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     pub fn tree_routing_next_hop(&self, addr: NwkAddress) -> NwkAddress {
-        let rm = self.ctx.get_profile().nwk_max_routers as u32;
+        let rm = self.get_profile().nwk_max_routers as u32;
 
-        let self_depth = self.ctx.parent.join_data.unwrap().depth + 1;
-        let self_addr = self.ctx.addr;
+        let self_depth = self.lock_parent_mut(|parent| parent.join_data.unwrap().depth + 1);
+        let self_addr = self.get_addr();
 
-        if distributed_nwk_is_descendant(self.ctx.get_profile(), self_depth, self_addr, addr) {
-            if (addr.0 as u32) > (self_addr.0 as u32) + rm * c_skip(self.ctx.get_profile(), self_depth) {
+        if distributed_nwk_is_descendant(self.get_profile(), self_depth, self_addr, addr) {
+            if (addr.0 as u32) > (self_addr.0 as u32) + rm * c_skip(self.get_profile(), self_depth) {
                 addr
             } else {
                 let addr = (self_addr.0 as u32)
                     + 1
                     + ((addr.0 as u32 - (self_addr.0 as u32 + 1))
-                    / c_skip(self.ctx.get_profile(), self_depth))
-                    * c_skip(self.ctx.get_profile(), self_depth);
+                    / c_skip(self.get_profile(), self_depth))
+                    * c_skip(self.get_profile(), self_depth);
                 NwkAddress(addr as u16)
             }
         } else {
-            self.ctx.parent.nwk_addr
+            self.lock_parent(|parent| parent.nwk_addr)
         }
     }
 
@@ -119,7 +116,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
     // 0x02, or the network address of its parent if it is an end device and
     // nwkAddrAlloc has a value of 0x00.
     pub fn get_routing_address_for_address(&self, addr: NwkAddress) -> NwkAddress {
-        match self.ctx.get_profile().nwk_addr_alloc {
+        match self.get_profile().nwk_addr_alloc {
             AddrAllocMethod::Distributed => {
                 self.get_distributed_network_routing_address(0, 0, addr.0 as u32).unwrap()
             }
@@ -133,7 +130,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
         parent_addr: u32,
         addr: u32,
     ) -> Option<NwkAddress> {
-        let ctx = self.ctx.get_profile();
+        let ctx = self.get_profile();
 
         let cm = ctx.nwk_max_children as u32;
         let rm = ctx.nwk_max_routers as u32;
@@ -172,14 +169,14 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<Initialized<T>, D, S>
 }
 
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     // 3.6.3.5.1
     pub async fn initiate_unicast_discovery(
         &mut self,
         dst_addr: NwkAddress,
         no_route_cache: bool,
     ) -> RouteDiscoveryRequestResult {
-        let slf_addr = self.ctx.addr;
+        let slf_addr = self.get_addr();
 
         // Each device issuing a route request command frame shall maintain a counter
         // used to generate route request identifiers. When a new route request
@@ -187,7 +184,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
         // value is stored in the device’s route discovery table in the Route
         // request identifier field. Other fields in the routing table and
         // route discovery table are set as described in section 3.6.3.2.
-        let route_request_id = self.ctx.route_request_counter;
+        let route_request_id = self.get_ctx().route_request_counter;
 
         // If the device initiating route discovery has no routing table entry
         // corresponding to the routing address of the destina- tion device, it
@@ -199,8 +196,8 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
         // routing table entry with a status value other than ACTIVE or VALIDA-
         // TION_UNDERWAY, that entry shall be used and the status of that entry shall be
         // set to DISCOVERY_UNDERWAY.
-        let key = RouteEntryKey::new(self.ctx.get_profile(), dst_addr, false);
-        let route = self.get_router_ctx_mut().route_table
+        let key = RouteEntryKey::new(self.get_profile(), dst_addr, false);
+        let route = self.get_route_table_mut()
             .entry(key)
             .and_modify(|route| {
                 if route.status != RouteStatus::Active
@@ -218,7 +215,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
                 next_hop_addr: Default::default(),
                 ..Default::default()
             })
-            .map_err(|_| RouteError::RouteError(NetworkStatusCode::NoRoutingCapacity))?;
+            .map_err(|_| RouteError::RouteError(NetworkStatus::NoRoutingCapacity))?;
 
         // The device shall also establish the corresponding route discovery table entry
         // if one with the same initiator and route request ID does not already
@@ -229,7 +226,7 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
                 (route_request_id, slf_addr),
                 RouteDiscoveryEntry::new(slf_addr, 0),
             )
-            .map_err(|_| RouteError::RouteError(NetworkStatusCode::NoRoutingCapacity))?;
+            .map_err(|_| RouteError::RouteError(NetworkStatus::NoRoutingCapacity))?;
 
         self.send_route_request_command(
             RouteRequestCmd {
@@ -261,33 +258,33 @@ impl<'a, T> ReceivedCommandFrame<'a, T> {
 }
 
 // 3.6.3.1
-pub fn compute_routing_cost(/* lqi: u8 */) -> u8 {
-    let lqi = 0;
+pub fn compute_routing_cost(/* lqi: u8 */) -> LinkCost {
+    let lqi = 0; // TODO
     if lqi <= 16 {
-        7
+        LinkCost::_7
     } else if lqi <= 32 {
-        6
+        LinkCost::_6
     } else if lqi <= 64 {
-        5
+        LinkCost::_5
     } else if lqi <= 96 {
-        4
+        LinkCost::_4
     } else if lqi <= 128 {
-        3
+        LinkCost::_3
     } else if lqi <= 192 {
-        2
+        LinkCost::_2
     } else {
-        7
+        LinkCost::_1
     }
 }
 
-impl<T: JoinedDevice, D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<T>>, D, S> {
+impl<T: JoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     // Address conflicts
     // 3.6.1.9
     async fn detect_addr_conflict_self(
         &mut self,
         hdr: &NwkHeader,
     ) -> bool {
-        if hdr.destination == self.ctx.addr {
+        if hdr.destination == self.get_addr() {
             if let Some(ext_addr) = hdr.destination_ieee
                 && ext_addr != self.get_ext_addr()
             {
@@ -295,7 +292,7 @@ impl<T: JoinedDevice, D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<T>>, D
             }
         }
 
-        let addr_map = &mut self.ctx.addr_map;
+        let addr_map = &mut self.get_addr_map_mut();
         let current_ext_addr = if let Some(source_ieee) = hdr.source_ieee {
             match addr_map.entry(hdr.source).or_insert(source_ieee) {
                 Ok(addr) => Some(addr),
@@ -311,8 +308,7 @@ impl<T: JoinedDevice, D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<T>>, D
                 if *ext_addr != src_ieee {
                     self.send_network_status_cmd(
                         NetworkStatusCmd {
-                            destination_address: hdr.source,
-                            status_code: NetworkStatusCode::AddressConflict,
+                            status: NetworkStatus::AddressConflict(hdr.source),
                             dest_short_addr: NwkAddress::BROADCAST_RX_ON_IDLE,
                             dest_extended_addr: None,
                         },
@@ -332,23 +328,23 @@ impl<T: JoinedDevice, D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<T>>, D
     }
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<EndDevice>>, D, S> {
+impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
     async fn handle_addr_conflict(&mut self, hdr: &NwkHeader) -> bool {
         self.detect_addr_conflict_self(hdr).await
     }
 }
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     async fn handle_addr_conflict(&mut self, hdr: &NwkHeader) -> bool {
         if self.detect_addr_conflict_self(hdr).await {
             return true;
         }
 
         let src_ieee = unwrap_or_return!(hdr.source_ieee, false);
-        if self.get_router_ctx_mut().children
+        if self.lock_neighbors(|children| children
             .find_by_short_addr(hdr.source)
             .map(|nb| nb.ext_addr.is_some() && nb.ext_addr.unwrap() == src_ieee)
-            .is_some()
+            .is_some())
         {
             // address_conflict
             return true; //TODO
@@ -359,27 +355,25 @@ impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
 
         false
     }
-}
 
-impl<D: NwkMac, S: StorageRegion> Nwk<Initialized<Joined<Router>>, D, S> {
     pub(crate) fn is_address_conflict(
         &self,
         nwk_addr: &NwkAddress,
         ext_addr: &ExtendedAddress,
         check_self: bool,
     ) -> bool {
-        if check_self && self.ctx.addr == *nwk_addr {
+        if check_self && self.get_addr() == *nwk_addr {
             return true;
         }
 
-        let addr_map = &self.ctx.addr_map;
+        let addr_map = &self.get_addr_map();
         if let Some(addr) = addr_map.get(nwk_addr) {
             return *addr != *ext_addr;
         };
 
-        self.get_router_ctx().children
+        self.lock_neighbors(|children| children
             .find_by_short_addr(*nwk_addr)
             .map(|nb| nb.ext_addr.is_some() && nb.ext_addr.unwrap() == *ext_addr)
-            .unwrap_or(false)
+            .unwrap_or(false))
     }
 }

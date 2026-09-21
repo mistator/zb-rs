@@ -206,24 +206,5 @@ async fn main(spawner: embassy_executor::Spawner) -> ! {
     spawner.spawn(button_push(switch.clone()).unwrap());
     map.insert(ApsEndpoint::new(1).unwrap(), switch).ok();
 
-    let mut node = match zdo::initialize(config, spawner, map, mac, storage).await {
-        InitializedNode::Joined(joined) => joined,
-        InitializedNode::Unjoined(mut unjoined) => {
-            (async || {
-                log::info!("node is not on a network, trying to connect...");
-
-                loop {
-                    match unjoined.network_steering().await {
-                        Ok(joined) => return joined,
-                        Err(err) => unjoined = err.state,
-                    };
-
-                    log::warn!("couldn't connect to a network, retrying in 10 seconds...");
-                    Timer::after_secs(10).await;
-                }
-            })().await
-        }
-    };
-
-    node.start().await
+    zdo::run(config, spawner, map, mac, storage).await;
 }

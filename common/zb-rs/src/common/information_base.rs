@@ -33,7 +33,8 @@ pub struct RouteEntryKey {
 }
 
 impl RouteEntryKey {
-    pub fn new(ctx: &StackProfileParams, addr: NwkAddress, is_group: bool) -> Self {
+    pub fn new(_ctx: &StackProfileParams, _addr: NwkAddress, is_group: bool) -> Self {
+        // TODO
         //let routing_addr = get_routing_address_for_address(ctx, addr);
 
         Self {
@@ -44,9 +45,9 @@ impl RouteEntryKey {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct RouteEntrySet(heapless::index_map::FnvIndexMap<RouteEntryKey, RouteEntry, 64>);
+pub struct RouteTable(heapless::index_map::FnvIndexMap<RouteEntryKey, RouteEntry, 64>);
 
-impl Deref for RouteEntrySet {
+impl Deref for RouteTable {
     type Target = heapless::index_map::FnvIndexMap<RouteEntryKey, RouteEntry, 64>;
 
     fn deref(&self) -> &Self::Target {
@@ -54,13 +55,13 @@ impl Deref for RouteEntrySet {
     }
 }
 
-impl DerefMut for RouteEntrySet {
+impl DerefMut for RouteTable {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl RouteEntrySet {
+impl RouteTable {
     pub fn cleanup(&mut self) {
         let now = Instant::now();
 

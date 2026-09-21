@@ -1,53 +1,34 @@
-use crate::apl::aps::apsme::{ApsGroupEntry, Binding};
-use crate::apl::aps::security::types::common::{
-    DeviceKeyPairDescriptor, KeyAttribute, LinkKeyType,
-};
-use crate::apl::aps::types::ApsEndpoint;
+use core::marker::PhantomData;
+use core::todo;
+use crate::apl::aps::apsme::{ApsGroupEntry, ApsmeAddGroupError, ApsmeBindError, ApsmeRemoveAllGroupsError, ApsmeRemoveGroupError, ApsmeUnbindError, Binding};
+use crate::apl::aps::security::types::common::{DeviceKeyPairDescriptor, KeyAttribute, LinkKeyType, RequestKeyType, StandardKeyType, TransportKeyData};
+use crate::apl::aps::types::{ApsEndpoint, ApsIndication, TxOptions};
 use crate::common::security::{SecurityNetworkParams, TRUST_CENTER_LINK_KEY};
-use crate::nwk::ctx::{NwkJoined};
 use crate::stack_profile::{StackProfile};
 use byte::ctx::Endian;
 use byte::{BytesExt, TryRead, TryWrite};
 use byte_derive::{TryRead, TryWrite};
 use derive_more::{Deref, DerefMut};
-use zb_hal::{StorageError, StorageRegion};
+use embassy_futures::select::{select, Either};
+use embassy_time::{Duration, TimeoutError, Timer};
+use heapless::storage::Storage;
+use zb_hal::{NwkMac, StorageError, StorageRegion};
 use zb_macros::try_write_impl;
-use zb_types::common::{ExtendedAddress};
+use zb_types::common::{ExtendedAddress, NwkAddress};
+use zb_types::{HashMap, HashSet};
+use crate::apl::aps::apsde::{ApsdeError, ApsdeRequest, ApsdeResult};
+use crate::apl::aps::frame::{ApsCommand, ApsCommandFrame, ApsCommandFrameCtr};
+use crate::apl::aps::security::sap::errors::ApsmeSecurityError;
+use crate::apl::aps::security::sap::service::{ApsSecurityResult, UpdateDeviceRequest};
+use crate::apl::aps::security::types::commands::{ConfirmKeyCommand, ConfirmKeyStatus, RemoveDeviceCommand, RequestKeyCommand, SwitchKeyCommand, VerifyKeyCommand};
+use crate::common::security::primitives::HmacAes128Mmo;
+use crate::nwk::ctx;
+use crate::nwk::ctx::{InitializedNwk, JoinedAsEndDevice, JoinedAsRouter, JoinedNwk, JoinedState, Nwk};
 
-#[derive(Clone, Default, Deref, DerefMut)]
-pub struct BindingTable(heapless::index_set::FnvIndexSet<Binding, 64>);
-
-impl<'a> TryRead<'a, Endian> for BindingTable {
-    fn try_read(bytes: &'a [u8], ctx: Endian) -> byte::Result<(Self, usize)> {
-        let offset = &mut 0;
-        let mut bindings = heapless::index_set::FnvIndexSet::<Binding, 64>::new();
-
-        let n_items = bytes.read_with::<u8>(offset, ctx)?;
-        for _ in 0..n_items {
-            let binding = bytes.read_with::<Binding>(offset, ctx)?;
-            bindings.insert(binding).ok();
-        }
-
-        Ok((Self(bindings), *offset))
-    }
-}
-
-#[try_write_impl]
-impl TryWrite<Endian> for &BindingTable {
-    fn try_write(self, bytes: &mut [u8], ctx: Endian) -> byte::Result<usize> {
-        let offset = &mut 0;
-
-        bytes.write_with(offset, self.0.len() as u8, ctx)?;
-        for item in self.0.into_iter() {
-            bytes.write_with(offset, *item, ctx)?;
-        }
-
-        Ok(*offset)
-    }
-}
+#[derive(Clone, Default, Deref, DerefMut, TryRead, TryWrite)]
+pub struct BindingTable(HashSet<Binding, 64>);
 
 pub const APS_STORAGE_SIZE: usize = 4096;
-pub trait ApsStorage : StorageRegion {}
 
 pub type DeviceKeyPairDescriptorSet = zb_types::Vec<DeviceKeyPairDescriptor, 64>;
 
@@ -58,11 +39,106 @@ struct ApsPersistentData {
     pub group_table: zb_types::Vec<ApsGroupEntry, 32>,
 }
 
-pub struct ApsContext<N: NwkJoined, S: StorageRegion> {
-    aps_counter: u8,
+pub trait Apsme {
+    fn bind_request(&mut self, binding: Binding) -> Result<(), ApsmeBindError>;
+    fn unbind_request(&mut self, binding: Binding) -> Result<(), ApsmeUnbindError>;
+    fn add_group(&mut self, group: u16, endpoint: u8) -> Result<(), ApsmeAddGroupError>;
+    fn remove_group(&mut self, group: u16, endpoint: u8) -> Result<(), ApsmeRemoveGroupError>;
+    fn remove_all_groups(&mut self, _endpoint: u8) -> Result<(), ApsmeRemoveAllGroupsError>;
+    fn is_authorized(&self) -> bool;
+    fn set_authorized(&mut self) -> ();
+    fn get_security_network_params(&self) -> SecurityNetworkParams;
+    fn get_tc_addr(&self) -> Option<ExtendedAddress>;
+    fn get_device_key_pair_set(&self) -> &DeviceKeyPairDescriptorSet;
+    fn get_device_key_pair_set_mut(&mut self) -> &mut DeviceKeyPairDescriptorSet;
+    fn set_parent_announce_timer(&mut self, timer: f32) -> ();
+}
 
-    pub nwk: N,
-    pub stg: S,
+pub trait ApsmeSecurity {
+    async fn transport_key(&mut self, dst_addr: ExtendedAddress, transport_key_data: TransportKeyData) -> ApsSecurityResult;
+    async fn update_device(&mut self, dst_addr: ExtendedAddress, req: UpdateDeviceRequest) -> ApsSecurityResult;
+    async fn remove_device(
+        &mut self,
+        parent_address: ExtendedAddress,
+        target_address: ExtendedAddress,
+    ) -> Result<(), ApsmeSecurityError>;
+    async fn request_key(
+        &mut self,
+        dest_address: ExtendedAddress,
+        key_type: RequestKeyType,
+    ) -> Result<(), ApsmeSecurityError>;
+    async fn switch_key(
+        &mut self,
+        dest_address: ExtendedAddress,
+        key_sequence_number: u8,
+    ) -> Result<(), ApsmeSecurityError>;
+    async fn verify_key(&mut self) -> ApsSecurityResult;
+    async fn confirm_key(
+        &mut self,
+        dest_address: ExtendedAddress,
+        status: ConfirmKeyStatus,
+    ) -> ApsSecurityResult;
+}
+
+pub trait ApsTransmit {
+    async fn aps_data_request<T>(&mut self, request: ApsdeRequest<T>) -> ApsdeResult
+    where
+        T: TryWrite<Endian> + Clone;
+}
+
+pub trait ApsListen {
+    async fn listen_aps(&mut self) -> ApsIndication;
+
+    async fn wait_for_indication<T>(&mut self, timeout: Duration, eval: fn(&ApsIndication) -> Option<T>) -> Result<T, TimeoutError> {
+        let timeout = Timer::after(timeout);
+
+        let receive = self.wait_for_indication_no_timeout(eval);
+        match select(timeout, receive).await {
+            Either::First(_) => Err(TimeoutError),
+            Either::Second(result) => Ok(result)
+        }
+    }
+
+    async fn wait_for_indication_no_timeout<T>(&mut self,eval: fn(&ApsIndication) -> Option<T>) -> T {
+        loop {
+            let indication = self.listen_aps().await;
+            if let Some(result) = eval(&indication) {
+                return result;
+            } else {
+                log::info!("[APSDE-INDICATION] received other indication {:?}", indication);
+                continue;
+            }
+        }
+    }
+}
+
+pub trait Apsde : ApsTransmit + ApsListen {}
+
+impl<D: NwkMac, S: StorageRegion,> Apsde for Aps<Nwk<JoinedAsEndDevice, D, S>, D, S> {}
+impl<D: NwkMac, S: StorageRegion,> Apsde for Aps<Nwk<JoinedAsRouter, D, S>, D, S> {}
+
+/*
+pub trait ApsState {}
+
+pub trait NonRoutingState : ApsState {}
+pub trait RoutingState : ApsState {}
+
+pub struct NonRouting;
+impl ApsState for NonRouting {}
+impl NonRoutingState for NonRouting {}
+
+pub struct Routing;
+impl ApsState for Routing {}
+impl RoutingState for Routing {}
+*/
+
+
+pub struct Aps<N: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion,> {
+    _marker: PhantomData<D>,
+    pub(crate) nwk: N,
+    pub(crate) stg: S,
+
+    aps_counter: u8,
 
     pub binding_table: BindingTable,
     pub group_table: zb_types::Vec<ApsGroupEntry, 32>,
@@ -82,32 +158,23 @@ pub struct ApsContext<N: NwkJoined, S: StorageRegion> {
     pub profile: StackProfile,
 }
 
-impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
+impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
     pub fn get_aps_counter(&mut self) -> u8 {
         self.aps_counter = self.aps_counter.wrapping_add(1);
         self.aps_counter
     }
 
-    pub fn is_authorized(&self) -> bool {
-        self.is_authorized
-    }
-
-    pub fn get_tc_addr(&self) -> Option<ExtendedAddress> {
-        match self.security_network_params {
-            SecurityNetworkParams::Centralized(addr) => Some(addr),
-            SecurityNetworkParams::Distributed => None
-        }
-    }
 }
 
-impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
+impl<J: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<J, D, S>  {
     pub fn new(
-        nwk: N,
+        nwk: J,
         stg: S,
         binding_table: BindingTable,
         group_table: zb_types::Vec<ApsGroupEntry, 32>,
     ) -> Self {
         Self {
+            _marker: PhantomData,
             nwk,
             stg,
             aps_counter: 0,
@@ -134,7 +201,7 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         }
     }
 
-    pub fn load_or_default(nwk: N, mut stg: S) -> ApsContext<N, S> {
+    pub fn load_or_default(nwk: J, mut stg: S) -> Aps<J, D, S> {
         let mut buffer = [0u8; APS_STORAGE_SIZE];
 
         stg.load(&mut buffer).ok();
@@ -158,34 +225,34 @@ impl<N: NwkJoined, S: StorageRegion> ApsContext<N, S> {
         let mut buffer = [0u8; APS_STORAGE_SIZE];
         buffer.write_with(&mut 0, persistent, byte::LE)?;
 
-        self.stg.persist(&buffer)?;
-        self.nwk.persist()
+        self.stg.persist(&buffer)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::apl::aps::ctx::{ApsContext, DeviceKeyPairDescriptorSet};
+    use core::marker::PhantomData;
+    use crate::apl::aps::ctx::{Aps, DeviceKeyPairDescriptorSet};
     use crate::apl::aps::security::types::common::DeviceKeyPairDescriptor;
     use crate::common::information_base::ParentInformation;
-    use crate::nwk::ctx::{EndDevice, Initialized, Joined, Nwk, NwkNeighbor};
     use crate::stack_profile::StackProfile;
     use bon::bon;
     use zb_hal_test_mock::driver::MockDriver;
     use zb_hal_test_mock::storage::MemoryStorage;
     use zb_types::common::{ExtendedAddress, NwkAddress, PanId};
+    use crate::nwk::ctx::{JoinedAsEndDevice, Nwk};
+    use crate::nwk::nib::NwkNeighbor;
 
     #[bon]
-    impl ApsContext<Nwk<Initialized<Joined<EndDevice>>, MockDriver, MemoryStorage>, MemoryStorage> {
+    impl Aps<Nwk<JoinedAsEndDevice, MockDriver, MemoryStorage>, MockDriver, MemoryStorage> {
         #[builder]
         pub fn end_device(
             #[builder(default = NwkAddress::from(0x1234))] addr: NwkAddress,
             #[builder(default = ExtendedAddress::from(0x1234_5678_90ab_cdef))]
             ext_addr: ExtendedAddress,
-            #[builder(default = ExtendedAddress::from(0x1234_5678_90ab_cdef))]
-            ext_pan_id: ExtendedAddress,
             #[builder(default = PanId::from(0x1234))] pan_id: PanId,
-            #[builder(default = NwkNeighbor::default())] parent: NwkNeighbor,
+            #[builder(default = NwkNeighbor::default())]
+            parent: NwkNeighbor,
             parent_information: Option<ParentInformation>,
             #[builder(default = StackProfile::ZigbeePro)] profile: StackProfile,
             key_pair_desc: Option<DeviceKeyPairDescriptor>
@@ -193,7 +260,6 @@ mod tests {
             let nwk = Nwk::end_device()
                 .addr(addr)
                 .ext_addr(ext_addr)
-                .ext_pan_id(ext_pan_id)
                 .pan_id(pan_id)
                 .parent(parent)
                 .maybe_parent_information(parent_information)
@@ -206,6 +272,7 @@ mod tests {
             };
 
             Self {
+                _marker: PhantomData,
                 aps_counter: 0,
                 nwk,
                 stg: MemoryStorage::new(),

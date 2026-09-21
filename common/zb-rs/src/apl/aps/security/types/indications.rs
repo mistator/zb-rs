@@ -25,3 +25,9 @@ pub struct ApsmeConfirmKeyIndication {
     pub src_address: ExtendedAddress,
     pub key_type: StandardKeyType,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct ApsmeRemoveDeviceIndication {
+    pub src_address: ExtendedAddress,
+    pub target_address: ExtendedAddress,
+}
