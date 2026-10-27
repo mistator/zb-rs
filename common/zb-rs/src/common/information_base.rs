@@ -66,13 +66,9 @@ impl RouteTable {
         let now = Instant::now();
 
         (*self).retain(|_, route| {
-            route
-                .discovery
-                .retain(|_, discovery| discovery.expiration_time >= now);
-            matches!(
-                route.status,
-                RouteStatus::Active | RouteStatus::ValidationUnderway
-            ) || !route.discovery.is_empty()
+            route.discovery.retain(|_, discovery| discovery.expiration_time >= now);
+            matches!(route.status, RouteStatus::Active | RouteStatus::ValidationUnderway)
+                || !route.discovery.is_empty()
         });
     }
 }

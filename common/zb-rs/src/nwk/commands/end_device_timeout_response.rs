@@ -1,5 +1,6 @@
 use crate::common::information_base::ParentInformation;
 use crate::nwk::commands::Command;
+use crate::nwk::ctx::{InitializedNwk, JoinedAsEndDevice, JoinedState, Nwk, RoutingState};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nlde::NldeTransferError;
@@ -9,7 +10,6 @@ use byte_derive::TryWrite;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::nwk::ctx::{InitializedNwk, JoinedAsEndDevice, JoinedState, Nwk, RoutingState};
 
 #[derive(Debug, Copy, Clone, TryRead, TryWrite)]
 pub struct EndDeviceTimeoutResponse {
@@ -29,7 +29,7 @@ impl<T: JoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         &mut self,
         short_addr: NwkAddress,
         ext_addr: ExtendedAddress,
-        status: EndDeviceTimeoutResponseStatus
+        status: EndDeviceTimeoutResponseStatus,
     ) -> NwkFrame {
         let hdr = NwkHeader::cmd(self)
             .destination(short_addr)
@@ -57,7 +57,11 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         end_device_extended_addr: ExtendedAddress,
         status: EndDeviceTimeoutResponseStatus,
     ) -> Result<(), NldeTransferError> {
-        let cmd_frame = self.make_end_device_timeout_response_cmd(end_device_short_addr, end_device_extended_addr, status);
+        let cmd_frame = self.make_end_device_timeout_response_cmd(
+            end_device_short_addr,
+            end_device_extended_addr,
+            status,
+        );
         self.transmit_frame(&cmd_frame, end_device_short_addr, true).await
     }
 }
@@ -73,11 +77,11 @@ impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
 
 #[cfg(test)]
 mod tests {
+    use crate::nwk::commands::end_device_timeout_response::EndDeviceTimeoutResponseStatus;
     use crate::nwk::commands::end_device_timeout_response::ParentInformation;
+    use crate::nwk::ctx::{InitializedNwk, Nwk, NwkListen};
     use embassy_time::{Duration, WithTimeout};
     use zb_hal_test_mock::driver::{DEFAULT_EXT_ADDR, DEFAULT_NWK_ADDR};
-    use crate::nwk::commands::end_device_timeout_response::EndDeviceTimeoutResponseStatus;
-    use crate::nwk::ctx::{InitializedNwk, Nwk, NwkListen};
 
     #[futures_test::test]
     async fn end_device_updates_parent_information_on_successful_end_device_timeout_response_cmd() {
@@ -92,10 +96,13 @@ mod tests {
 
         nwk.listen_nwk(true).with_timeout(Duration::from_millis(100)).await.ok();
 
-        assert_eq!(nwk.get_ctx().parent_information, ParentInformation {
-            mac_data_poll_keepalive_supported: true,
-            end_device_timeout_request_keepalive_supported: true,
-            power_negotiation_supported: false,
-        })
+        assert_eq!(
+            nwk.get_ctx().parent_information,
+            ParentInformation {
+                mac_data_poll_keepalive_supported: true,
+                end_device_timeout_request_keepalive_supported: true,
+                power_negotiation_supported: false,
+            }
+        )
     }
 }

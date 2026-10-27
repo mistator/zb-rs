@@ -1,7 +1,7 @@
 pub mod binding;
+pub mod descriptors;
 pub mod discovery;
 pub mod network;
-pub mod descriptors;
 
 use byte::TryRead;
 use byte_derive::TryRead;
@@ -40,13 +40,7 @@ impl TryRead<'_, u16> for ZdpCommand {
         let transaction_sequence_number = bytes[0];
         let (data, length) = TransactionData::try_read(&bytes[1..], cluster_id)?;
 
-        Ok((
-            Self {
-                transaction_sequence_number,
-                transaction_data: data,
-            },
-            length,
-        ))
+        Ok((Self { transaction_sequence_number, transaction_data: data }, length))
     }
 }
 
@@ -153,11 +147,15 @@ pub enum TransactionData {
 }
 
 impl TransactionData {
-    pub fn discriminant(&self) -> u16 { unsafe { *<*const _>::from(self).cast::<u16>() } }
+    pub fn discriminant(&self) -> u16 {
+        unsafe { *<*const _>::from(self).cast::<u16>() }
+    }
 }
 
 impl Default for TransactionData {
-    fn default() -> Self { TransactionData::NwkAddrReq(NwkAddrReq::default()) }
+    fn default() -> Self {
+        TransactionData::NwkAddrReq(NwkAddrReq::default())
+    }
 }
 
 #[cfg(test)]

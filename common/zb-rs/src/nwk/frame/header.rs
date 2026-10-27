@@ -5,7 +5,6 @@ use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::BitStruct;
 use zb_types::common::{ExtendedAddress, NwkAddress};
 
-
 use crate::nwk::ctx::{BaseNwk, InitializedNwk};
 use crate::nwk::ctx::{InitializedState, Nwk};
 
@@ -49,7 +48,7 @@ pub enum MulticastMode {
 pub struct SourceRouteSubframe {
     pub relay_count: u8,
     pub relay_index: u8,
-    pub relay_list: zb_types::Vec<u16, 32>,
+    pub relay_list: zb_types::Vec<NwkAddress, 16>,
 }
 
 #[derive(BitStruct, Clone, Copy, Default, Eq, PartialEq, Debug)]
@@ -85,7 +84,6 @@ pub struct NwkHeader {
     #[byte(parse_if = control.source_route)]
     pub source_route_subframe: Option<SourceRouteSubframe>,
 }
-
 
 #[bon]
 impl NwkHeader {
@@ -198,7 +196,7 @@ impl NwkHeader {
             dst_ext_addr: destination_ieee.is_some(),
             src_ext_addr: source_ieee.is_some(),
             //end_device_initiator: !ctx.is_router() && *ctx.get_parent_information() != ParentInformation::default(),
-            end_device_initiator: false // TODO
+            end_device_initiator: false, // TODO
         };
 
         Self {

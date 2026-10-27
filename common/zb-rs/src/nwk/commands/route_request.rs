@@ -4,10 +4,12 @@ use crate::common::information_base::RouteDiscoveryEntry;
 use crate::common::information_base::RouteEntry;
 use crate::common::information_base::RouteEntryKey;
 use crate::nwk::commands::Command;
+use crate::nwk::commands::link_status::LinkCost;
 use crate::nwk::constants::MAX_ROUTE_REQUEST_JITTER;
 use crate::nwk::constants::MIN_ROUTE_REQUEST_JITTER;
 use crate::nwk::constants::ROUTE_REQUEST_RETRIES;
 use crate::nwk::constants::ROUTE_REQUEST_RETRY_INTERVAL;
+use crate::nwk::ctx::{BaseNwkPrivate, InitializedNwk, JoinedState, Nwk, RoutingState};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nib::RouteStatus;
@@ -26,8 +28,6 @@ use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::BitStruct;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::nwk::commands::link_status::LinkCost;
-use crate::nwk::ctx::{BaseNwkPrivate, InitializedNwk, JoinedState, Nwk, RoutingState};
 
 #[derive(TryRead, TryWrite, PartialEq, Clone, Copy, Debug)]
 #[repr(u8)]
@@ -43,7 +43,7 @@ pub struct CommandOptions {
     #[bit_struct(skip = 3)]
     pub many_to_one: ManyToOne,
     pub destination_ieee: bool,
-    pub multicast: bool
+    pub multicast: bool,
 }
 
 #[derive(Debug, Clone, TryRead, TryWrite)]
@@ -126,9 +126,7 @@ impl<T: JoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         &mut self,
         config: RouteRequestCmd,
     ) -> Result<(), NldeTransferError> {
-        let hdr = NwkHeader::cmd(self)
-            .destination(NwkAddress::BROADCAST_ROUTERS)
-            .call();
+        let hdr = NwkHeader::cmd(self).destination(NwkAddress::BROADCAST_ROUTERS).call();
 
         let cmd = RouteRequest {
             command_options: CommandOptions {
@@ -199,16 +197,14 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     RouteDiscoveryRequestAddress::UnicastOrBroadcast(frame.cmd.dst_addr)
                 };
 
-                ctx.send_route_request_command(
-                    RouteRequestCmd {
-                        dst_addr,
-                        ieee_destination: frame.cmd.destination_ieee_address,
-                        route_request_id: frame.cmd.route_request_id,
-                        path_cost: frame.cmd.path_cost,
-                    },
-                )
-                    .await
-                    .ok();
+                ctx.send_route_request_command(RouteRequestCmd {
+                    dst_addr,
+                    ieee_destination: frame.cmd.destination_ieee_address,
+                    route_request_id: frame.cmd.route_request_id,
+                    path_cost: frame.cmd.path_cost,
+                })
+                .await
+                .ok();
 
                 retries += 1;
             }
@@ -220,14 +216,13 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         }
 
         let path_cost = if cmd.is_many_to_one() || self.get_profile().nwk_sym_link {
-            match self.lock_neighbors(|nbs|
-                nbs
-                    .children
+            match self.lock_neighbors(|nbs| {
+                nbs.neighbors
                     .iter()
                     .find(|nb| nb.nwk_addr == frame.mac_src_addr)
                     .map(|nb| nb.outgoing_cost)
-                    .unwrap_or_default())
-            {
+                    .unwrap_or_default()
+            }) {
                 LinkCost::Unknown => return,
                 path_cost => max(path_cost as u8, cmd.path_cost),
             }
@@ -237,32 +232,28 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
 
         let matches_self_or_children = (cmd.is_unicast()
             && (self.get_addr() == cmd.dst_addr
-            || self.lock_neighbors(|nbs| nbs
-                .children
-                .iter()
-                .find(|nb| nb.is_child() && nb.nwk_addr == cmd.dst_addr)
-                .is_some())))
-            || (cmd.is_multicast()
-            && self.get_group_table()
-            .contains(&cmd.dst_addr));
+                || self.lock_neighbors(|nbs| {
+                    nbs.neighbors
+                        .iter()
+                        .find(|nb| nb.is_child() && nb.nwk_addr == cmd.dst_addr)
+                        .is_some()
+                })))
+            || (cmd.is_multicast() && self.get_group_table().contains(&cmd.dst_addr));
 
         self.get_route_table_mut().cleanup();
         if !self.has_routing_capacity() {
-            if self.get_profile().nwk_addr_alloc == AddrAllocMethod::Distributed
-                && cmd.is_unicast()
+            if self.get_profile().nwk_addr_alloc == AddrAllocMethod::Distributed && cmd.is_unicast()
             {
                 let result = self.lock_neighbors(|nbs| {
-                    let source_nb = nbs
-                        .children
-                        .iter()
-                        .find(|nb| nb.nwk_addr == frame.mac_src_addr);
+                    let source_nb =
+                        nbs.neighbors.iter().find(|nb| nb.nwk_addr == frame.mac_src_addr);
 
                     if let Some(source_nb) = source_nb {
                         let originator_is_descendant = distributed_nwk_is_descendant(
                             &self.get_profile(),
                             0, // FIXME
                             frame.originator_addr(),
-                            self.get_addr()
+                            self.get_addr(),
                         );
                         if (source_nb.is_parent() && originator_is_descendant)
                             || (source_nb.is_child() && !originator_is_descendant)
@@ -273,7 +264,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                         return false;
                     }
 
-                     true
+                    true
                 });
 
                 if !result {
@@ -283,7 +274,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                 if matches_self_or_children {
                     self.send_route_reply_cmd(frame, path_cost).await.ok();
                 } else {
-                    frame.cmd.path_cost += compute_routing_cost() as u8;
+                    frame.cmd.path_cost += compute_routing_cost(frame.lqi) as u8;
                     // TODO: forward route request
                 }
             } else {
@@ -297,86 +288,75 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
             // TODO: Should we add a discovery entry here?
             if cmd.is_many_to_one() || self.get_profile().nwk_sym_link {
                 // Add active route to source
-                let key = RouteEntryKey::new(
-                    self.get_profile(),
-                    frame.originator_addr(),
-                    false,
-                );
+                let key = RouteEntryKey::new(self.get_profile(), frame.originator_addr(), false);
                 unwrap_or_return!(
-                self.get_route_table_mut()
-                    .entry(key)
-                    .and_modify(|route| {
-                        route.status = RouteStatus::Active;
-                        if route.next_hop_addr != frame.mac_src_addr {
-                            route.next_hop_addr = frame.mac_src_addr;
-                            route.route_record_required = cmd.is_many_to_one()
-                        }
-                    })
-                    .or_insert(RouteEntry {
-                        status: RouteStatus::Active,
-                        no_route_cache: cmd.no_route_cache(),
-                        many_to_one: cmd.is_many_to_one(),
-                        route_record_required: cmd.is_many_to_one(), /* TODO: Check if required
-                                                                      * for unicast */
-                        is_group: false,
-                        next_hop_addr: frame.mac_src_addr,
-                        ..Default::default()
-                    })
-                    .ok()
-            );
+                    self.get_route_table_mut()
+                        .entry(key)
+                        .and_modify(|route| {
+                            route.status = RouteStatus::Active;
+                            if route.next_hop_addr != frame.mac_src_addr {
+                                route.next_hop_addr = frame.mac_src_addr;
+                                route.route_record_required = cmd.is_many_to_one()
+                            }
+                        })
+                        .or_insert(RouteEntry {
+                            status: RouteStatus::Active,
+                            no_route_cache: cmd.no_route_cache(),
+                            many_to_one: cmd.is_many_to_one(),
+                            route_record_required: cmd.is_many_to_one(), /* TODO: Check if required
+                                                                          * for unicast */
+                            is_group: false,
+                            next_hop_addr: frame.mac_src_addr,
+                            ..Default::default()
+                        })
+                        .ok()
+                );
             }
 
             if (cmd.is_unicast() || cmd.is_multicast()) && !matches_self_or_children {
                 // Add route and discovery entries to destination if the device or any of its
                 // children is not the destination
-                let key = RouteEntryKey::new(
-                    self.get_profile(),
-                    cmd.dst_addr,
-                    cmd.is_multicast(),
-                );
+                let key = RouteEntryKey::new(self.get_profile(), cmd.dst_addr, cmd.is_multicast());
                 let route = unwrap_or_return!(
-                self.get_route_table_mut()
-                    .entry(key)
-                    .and_modify(|route| {
-                        if !matches!(
-                            route.status,
-                            RouteStatus::Active | RouteStatus::ValidationUnderway
-                        ) {
-                            route.status = RouteStatus::DiscoveryUnderway
-                        }
-                    })
-                    .or_insert(RouteEntry {
-                        status: RouteStatus::DiscoveryUnderway,
-                        no_route_cache: false,
-                        many_to_one: false,
-                        next_hop_addr: Default::default(),
-                        is_group: cmd.is_multicast(),
-                        route_record_required: false,
-                        discovery: Default::default(),
-                    })
-                    .ok()
-            );
+                    self.get_route_table_mut()
+                        .entry(key)
+                        .and_modify(|route| {
+                            if !matches!(
+                                route.status,
+                                RouteStatus::Active | RouteStatus::ValidationUnderway
+                            ) {
+                                route.status = RouteStatus::DiscoveryUnderway
+                            }
+                        })
+                        .or_insert(RouteEntry {
+                            status: RouteStatus::DiscoveryUnderway,
+                            no_route_cache: false,
+                            many_to_one: false,
+                            next_hop_addr: Default::default(),
+                            is_group: cmd.is_multicast(),
+                            route_record_required: false,
+                            discovery: Default::default(),
+                        })
+                        .ok()
+                );
 
-                let new_path_cost = path_cost + compute_routing_cost() as u8;
+                let new_path_cost = path_cost + compute_routing_cost(frame.lqi) as u8;
                 let key = (cmd.route_request_id, frame.originator_addr());
                 unwrap_or_return!(
-                route
-                    .discovery
-                    .entry(key)
-                    .and_modify(|discovery_route| {
-                        if new_path_cost >= discovery_route.forward_cost {
-                            return;
-                        }
+                    route
+                        .discovery
+                        .entry(key)
+                        .and_modify(|discovery_route| {
+                            if new_path_cost >= discovery_route.forward_cost {
+                                return;
+                            }
 
-                        discovery_route.forward_cost = new_path_cost;
-                        discovery_route.sender_addr = frame.mac_src_addr;
-                    })
-                    .or_insert(RouteDiscoveryEntry::new(
-                        frame.mac_src_addr,
-                        new_path_cost
-                    ))
-                    .ok()
-            );
+                            discovery_route.forward_cost = new_path_cost;
+                            discovery_route.sender_addr = frame.mac_src_addr;
+                        })
+                        .or_insert(RouteDiscoveryEntry::new(frame.mac_src_addr, new_path_cost))
+                        .ok()
+                );
             } else if (cmd.is_unicast() || cmd.is_multicast()) && matches_self_or_children {
                 // else, send reply and return
                 unwrap_or_return!(self.send_route_reply_cmd(frame, path_cost).await.ok());

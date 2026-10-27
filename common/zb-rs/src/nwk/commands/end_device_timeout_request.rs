@@ -1,16 +1,23 @@
-use alloc::sync::Arc;
-use core::ops::{Add, Div};
-use core::sync::atomic::{AtomicU8, Ordering};
-use bon::Builder;
+use crate::common::security::frame::SecurityLevel;
+use crate::mac::mlme::Mlme;
 use crate::nwk::commands::Command;
 use crate::nwk::commands::end_device_timeout_response::EndDeviceTimeoutResponseStatus;
+use crate::nwk::constants::{MAX_ROUTE_REQUEST_JITTER_MILLIS, MIN_ROUTE_REQUEST_JITTER_MILLIS};
+use crate::nwk::ctx::{BaseNwk, InitializedNwk, JoinedAsEndDevice, Nwk, RoutingState};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
+use crate::nwk::nib::NetworkSecurityMaterialDescriptorSet;
 use crate::nwk::nlde::{NldeTransferError, TransferResult};
+use crate::nwk::security::EncryptedFrameParams;
 use crate::nwk::service::routing::ReceivedCommandFrame;
+use crate::nwk::service::transmission::build_mac_payload;
 use crate::unwrap_or_return;
+use alloc::sync::Arc;
+use bon::Builder;
 use byte_derive::TryRead;
 use byte_derive::TryWrite;
+use core::ops::{Add, Div};
+use core::sync::atomic::{AtomicU8, Ordering};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
@@ -19,13 +26,6 @@ use rand::{RngExt, SeedableRng};
 use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::{DeviceType, ExtendedAddress, NwkAddress};
 use zb_types::mac::A_MAX_MAC_PAYLOAD_SIZE;
-use crate::common::security::frame::SecurityLevel;
-use crate::mac::mlme::Mlme;
-use crate::nwk::constants::{MAX_ROUTE_REQUEST_JITTER_MILLIS, MIN_ROUTE_REQUEST_JITTER_MILLIS};
-use crate::nwk::ctx::{BaseNwk, InitializedNwk, JoinedAsEndDevice, JoinedNwk, Nwk, RoutingState};
-use crate::nwk::nib::NetworkSecurityMaterialDescriptorSet;
-use crate::nwk::security::EncryptedFrameParams;
-use crate::nwk::service::transmission::build_mac_payload;
 
 #[derive(TryRead, TryWrite, Clone, Copy, Debug, Default, PartialEq)]
 #[repr(u8)]
@@ -98,7 +98,10 @@ fn build_end_device_timeout_request_cmd_frame(
 // This allows the parent the ability to delete the child entry from the neighbor table if the child has not communicated
 // with the parent in the specified amount of time.
 impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
-    pub async fn send_end_device_timeout_request_cmd(&mut self, requested_timeout: DeviceTimeout) -> TransferResult {
+    pub async fn send_end_device_timeout_request_cmd(
+        &mut self,
+        requested_timeout: DeviceTimeout,
+    ) -> TransferResult {
         let (nwk_addr, ext_addr) = self.lock_parent(|parent| (parent.nwk_addr, parent.ext_addr));
 
         let frame = build_end_device_timeout_request_cmd_frame()
@@ -130,19 +133,19 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         // Configuration field set to anything other than 0 shall reject the message. The receiving device shall send an End
         // Device Timeout Response command with a status of 0x01 (INCORRECT_VALUE).
         if cmd.end_device_configuration != 0 {
-            return self.send_end_device_timeout_response_cmd(
-                frame.mac_src_addr,
-                ext_addr,
-                EndDeviceTimeoutResponseStatus::IncorrectValue,
-            )
+            return self
+                .send_end_device_timeout_response_cmd(
+                    frame.mac_src_addr,
+                    ext_addr,
+                    EndDeviceTimeoutResponseStatus::IncorrectValue,
+                )
                 .await;
         }
 
         let found = self.lock_neighbors_mut(|nbs| {
-            let neighbor = nbs
-                .children
-                .iter_mut()
-                .find(|nb| nb.nwk_addr == frame.mac_src_addr && nb.device_type == DeviceType::EndDevice);
+            let neighbor = nbs.neighbors.iter_mut().find(|nb| {
+                nb.nwk_addr == frame.mac_src_addr && nb.device_type == DeviceType::EndDevice
+            });
 
             if let Some(neighbor) = neighbor {
                 let duration = cmd.requested_timeout.get_duration();
@@ -157,7 +160,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         });
 
         if !found {
-            return Ok(())
+            return Ok(());
         }
 
         self.send_end_device_timeout_response_cmd(
@@ -165,7 +168,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
             ext_addr,
             EndDeviceTimeoutResponseStatus::Success,
         )
-            .await
+        .await
     }
 }
 
@@ -209,29 +212,34 @@ pub async fn end_device_keepalive_task<D: NwkMac>(mut params: EndDeviceKeepalive
 
         let size = build_mac_payload(&frame, &mut buffer, &encrypted_frame_params).unwrap(); // TODO
 
-        let jitter = rand.random_range::<usize, _>(MIN_ROUTE_REQUEST_JITTER_MILLIS..MAX_ROUTE_REQUEST_JITTER_MILLIS);
+        let jitter = rand.random_range::<usize, _>(
+            MIN_ROUTE_REQUEST_JITTER_MILLIS..MAX_ROUTE_REQUEST_JITTER_MILLIS,
+        );
         Timer::after_millis(jitter as u64).await;
 
-        params.mac
+        params
+            .mac
             .data_transmit_request(NwkAddress::MAX, &mut buffer[..size], false)
             .await
-            .map_err(|err| NldeTransferError::McpsDataError(err)).ok();
+            .map_err(|err| NldeTransferError::McpsDataError(err))
+            .ok();
 
         ticker.next().await;
     }
-
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::nwk::commands::Command;
+    use crate::nwk::commands::end_device_timeout_request::{
+        DeviceTimeout, build_end_device_timeout_request_cmd_frame,
+    };
+    use crate::nwk::commands::end_device_timeout_response::EndDeviceTimeoutResponseStatus;
+    use crate::nwk::ctx::tests::{DEFAULT_CHILD_EXT_ADDR, DEFAULT_CHILD_NWK_ADDR};
+    use crate::nwk::ctx::{BaseNwk, InitializedNwk, Nwk, NwkListen};
+    use crate::nwk::frame::{CommandFrame, NwkFrame};
     use embassy_time::{Duration, Instant, WithTimeout};
     use zb_types::common::{ExtendedAddress, NwkAddress};
-    use crate::nwk::commands::Command;
-    use crate::nwk::commands::end_device_timeout_request::{build_end_device_timeout_request_cmd_frame, DeviceTimeout};
-    use crate::nwk::commands::end_device_timeout_response::EndDeviceTimeoutResponseStatus;
-    use crate::nwk::ctx::{BaseNwk, Nwk, InitializedNwk, NwkListen};
-    use crate::nwk::ctx::tests::{DEFAULT_CHILD_EXT_ADDR, DEFAULT_CHILD_NWK_ADDR};
-    use crate::nwk::frame::{CommandFrame, NwkFrame};
 
     #[macro_export]
     macro_rules! assert_timeout {
@@ -240,9 +248,12 @@ mod tests {
         };
         ($future:expr, $timeout_millis:expr) => {
             let result = embassy_time::WithTimeout::with_timeout(
-                $future, embassy_time::Duration::from_millis($timeout_millis)).await;
+                $future,
+                embassy_time::Duration::from_millis($timeout_millis),
+            )
+            .await;
             core::assert_matches!(result, Err(embassy_time::TimeoutError));
-        }
+        };
     }
 
     #[futures_test::test]
@@ -265,7 +276,7 @@ mod tests {
     #[futures_test::test]
     async fn router_increases_child_timeout_on_valid_end_device_timeout_request() {
         let mut nwk = Nwk::router().call();
-        let before_timeout = nwk.lock_neighbors(|nbs| nbs.children.first().unwrap().expiration);
+        let before_timeout = nwk.lock_neighbors(|nbs| nbs.neighbors.first().unwrap().expiration);
 
         let end_device_frame = build_end_device_timeout_request_cmd_frame()
             .source(DEFAULT_CHILD_NWK_ADDR)
@@ -279,7 +290,7 @@ mod tests {
         nwk.add_received_frame(&end_device_frame);
         nwk.listen_nwk(true).with_timeout(Duration::from_millis(100)).await.ok();
 
-        let after_timeout = nwk.lock_neighbors(|nbs| nbs.children.first().unwrap().expiration);
+        let after_timeout = nwk.lock_neighbors(|nbs| nbs.neighbors.first().unwrap().expiration);
 
         assert_ne!(before_timeout, after_timeout);
         let timeout_duration = DeviceTimeout::Mins8.get_duration();
@@ -289,7 +300,8 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn router_returns_valid_end_device_timeout_response_on_valid_end_device_timeout_request() {
+    async fn router_returns_valid_end_device_timeout_response_on_valid_end_device_timeout_request()
+    {
         let mut nwk = Nwk::router().call();
 
         let end_device_frame = build_end_device_timeout_request_cmd_frame()
@@ -305,7 +317,11 @@ mod tests {
         nwk.listen_nwk(true).with_timeout(Duration::from_millis(100)).await.ok();
 
         let sent_frame = nwk.get_last_transmitted_frame().expect("no frames sent");
-        if let NwkFrame::NwkCommand(CommandFrame { header, command: Command::EndDeviceTimeoutResponse(cmd) }) = sent_frame {
+        if let NwkFrame::NwkCommand(CommandFrame {
+            header,
+            command: Command::EndDeviceTimeoutResponse(cmd),
+        }) = sent_frame
+        {
             assert_eq!(header.source, nwk.get_addr());
             assert_eq!(header.destination, DEFAULT_CHILD_NWK_ADDR);
             assert_eq!(cmd.status, EndDeviceTimeoutResponseStatus::Success);
@@ -315,7 +331,8 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn router_returns_invalid_end_device_timeout_response_on_invalid_end_device_timeout_request() {
+    async fn router_returns_invalid_end_device_timeout_response_on_invalid_end_device_timeout_request()
+     {
         let mut nwk = Nwk::router().call();
 
         let mut end_device_frame = build_end_device_timeout_request_cmd_frame()
@@ -327,7 +344,11 @@ mod tests {
             .requested_timeout(DeviceTimeout::Mins8)
             .call();
 
-        if let NwkFrame::NwkCommand(CommandFrame { command: Command::EndDeviceTimeoutRequest(ref mut cmd), .. }) = end_device_frame {
+        if let NwkFrame::NwkCommand(CommandFrame {
+            command: Command::EndDeviceTimeoutRequest(ref mut cmd),
+            ..
+        }) = end_device_frame
+        {
             cmd.end_device_configuration = 1;
         }
 
@@ -335,7 +356,11 @@ mod tests {
         nwk.listen_nwk(true).with_timeout(Duration::from_millis(100)).await.ok();
 
         let sent_frame = nwk.get_last_transmitted_frame().expect("no frames sent");
-        if let NwkFrame::NwkCommand(CommandFrame { header, command: Command::EndDeviceTimeoutResponse(cmd) }) = sent_frame {
+        if let NwkFrame::NwkCommand(CommandFrame {
+            header,
+            command: Command::EndDeviceTimeoutResponse(cmd),
+        }) = sent_frame
+        {
             assert_eq!(header.source, nwk.get_addr());
             assert_eq!(header.destination, DEFAULT_CHILD_NWK_ADDR);
             assert_eq!(cmd.status, EndDeviceTimeoutResponseStatus::IncorrectValue);

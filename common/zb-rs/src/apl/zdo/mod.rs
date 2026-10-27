@@ -1,49 +1,57 @@
 use alloc::sync::Arc;
 use core::marker::PhantomData;
-use core::sync::atomic::AtomicU8;
-use embassy_futures::select::{select, Either, select3, Either3};
-use embassy_time::{Timer, WithTimeout};
+use embassy_futures::select::{Either, Either3, select3};
 use embassy_time::{Duration, TimeoutError};
+use embassy_time::{Timer, WithTimeout};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
-use crate::apl::aps::apsde::{ApsdeAddress};
-use crate::apl::aps::ctx::{Aps, APS_STORAGE_SIZE, ApsListen, Apsme, Apsde, ApsmeSecurity};
+use crate::apl::aps::apsde::ApsdeAddress;
+use crate::apl::aps::ctx::{APS_STORAGE_SIZE, Aps, ApsListen, Apsde, Apsme, ApsmeSecurity};
 use crate::apl::aps::security::sap::errors::ApsmeSecurityError;
 use crate::apl::aps::security::sap::service::ApsSecurityResult;
 use crate::apl::aps::security::types::commands::ConfirmKeyStatus;
-use crate::apl::aps::security::types::common::{KeyAttribute, LinkKeyType, RequestKeyType, TransportKeyData};
+use crate::apl::aps::security::types::common::{
+    KeyAttribute, LinkKeyType, RequestKeyType, TransportKeyData,
+};
 use crate::apl::aps::security::types::indications::ApsmeTransportKeyIndication;
 use crate::apl::aps::types::ApsIndication;
 use crate::apl::aps::types::{ApsAddress, ApsEndpoint};
-use crate::apl::zb_application::{APPLICATIONS_SR_SIZE, ZbApplications, ZbApplicationsDef, ZbApplicationsMap};
+use crate::apl::zb_application::{
+    APPLICATIONS_SR_SIZE, ZbApplications, ZbApplicationsDef, ZbApplicationsMap,
+};
 use crate::apl::zdo::config::ZbConfig;
 use crate::apl::zdp::ZDP_ENDPOINT;
 use crate::apl::zdp::types::network::MgmtPermitJoiningReq;
 use crate::bdb::constants::{MIN_COMMISSIONING_TIME, REC_SAME_NETWORK_RETRY_ATTEMPTS};
 use crate::common::security::SecurityNetworkParams;
 use crate::mac::mlme::Mlme;
-use crate::nwk::ctx::{BaseNwk, InitializedNwk, Nwk, NwkConfig, NwkContext, PendingJoin, RoutingState, Uninitialized, NWK_STORAGE_SIZE, JoinedState, JoinedAsRouter, BaseNwkPrivate};
+use crate::nwk::commands::end_device_timeout_request::{
+    DeviceTimeout, EndDeviceKeepaliveTask, end_device_keepalive_task,
+};
+use crate::nwk::commands::link_status::{LinkStatusTaskParams, link_status_task};
+use crate::nwk::ctx::{
+    BaseNwk, BaseNwkPrivate, InitializedNwk, JoinedAsRouter, NWK_STORAGE_SIZE, Nwk, NwkConfig,
+    PendingJoin, Uninitialized,
+};
+use crate::nwk::ctx::{JoinedAsEndDevice, JoinedNwk};
 use crate::nwk::nib::{NetworkKeyType, NetworkSecurityMaterialDescriptor};
+use crate::nwk::nlde::NlmeLeaveIndication;
 use crate::nwk::nlme::{NlmeAssociationJoinRequest, NlmeRejoinRequest, ScanDuration, ScanRequest};
+use crate::unwrap_or_return;
 use crate::zcl::cluster::types::MAX_ATTRIBUTES_PER_CLUSTER;
 use crate::zcl::command::global::AttributeRecord;
 use crate::zcl::command::global::ReportAttributesCommand;
 use crate::zcl::frame::ZclDirection;
 use crate::zcl::service::EmitCommandFrameCfg;
 use crate::zcl::service::RequestCfg;
-use crate::unwrap_or_return;
 use zb_hal::{NwkMac, StoragePool, StorageRegion};
 use zb_types::common::NwkAddress;
 use zb_types::mac::ChannelMask;
 use zb_types::transitions::{TransitionError, TransitionResult};
-use crate::nwk::commands::end_device_timeout_request::{end_device_keepalive_task, DeviceTimeout, EndDeviceKeepaliveTask};
-use crate::nwk::commands::link_status::{link_status_task, LinkStatusTaskParams};
-use crate::nwk::ctx::{JoinedAsEndDevice, JoinedNwk};
-use crate::nwk::nlde::NlmeLeaveIndication;
 
 pub trait ZbNodeStatus {}
-pub trait ZbNodeJoinedStatus<D: NwkMac, S: StorageRegion> : ZbNodeStatus {
+pub trait ZbNodeJoinedStatus<D: NwkMac, S: StorageRegion>: ZbNodeStatus {
     fn get_aps(&self) -> &(impl Apsde + Apsme + ApsmeSecurity);
     fn get_aps_mut(&mut self) -> &mut (impl Apsde + Apsme + ApsmeSecurity);
     fn get_nwk(&self) -> &impl JoinedNwk<D, S>;
@@ -65,57 +73,71 @@ pub struct PendingRejoinCtx<D: NwkMac, S: StorageRegion> {
 }
 impl<D: NwkMac, S: StorageRegion> ZbNodeStatus for PendingRejoinCtx<D, S> {}
 
-pub struct EndDeviceNodeCtx<D: NwkMac, S: StorageRegion> where Aps<Nwk<JoinedAsEndDevice, D, S>, D, S> : ApsListen {
+pub struct EndDeviceNodeCtx<D: NwkMac, S: StorageRegion>
+where
+    Aps<Nwk<JoinedAsEndDevice, D, S>, D, S>: ApsListen,
+{
     zcl_transaction_number: u8,
-    pub aps: Aps<Nwk<JoinedAsEndDevice, D, S>, D, S>
+    pub aps: Aps<Nwk<JoinedAsEndDevice, D, S>, D, S>,
 }
 impl<D: NwkMac, S: StorageRegion> ZbNodeStatus for EndDeviceNodeCtx<D, S> {}
 impl<D: NwkMac, S: StorageRegion> ZbNodeJoinedStatus<D, S> for EndDeviceNodeCtx<D, S> {
-    fn get_aps(&self) -> &(impl Apsde + Apsme + ApsmeSecurity) { &self.aps }
-    fn get_aps_mut(&mut self) -> &mut (impl Apsde + Apsme + ApsmeSecurity) { &mut self.aps }
-    fn get_nwk(&self) -> &impl JoinedNwk<D, S> { &self.aps.nwk }
-    fn get_nwk_mut(&mut self) -> &mut impl JoinedNwk<D, S> { &mut self.aps.nwk }
-    fn get_zcl_transaction_number(&mut self) -> u8 { self.zcl_transaction_number.wrapping_add(1) }
+    fn get_aps(&self) -> &(impl Apsde + Apsme + ApsmeSecurity) {
+        &self.aps
+    }
+    fn get_aps_mut(&mut self) -> &mut (impl Apsde + Apsme + ApsmeSecurity) {
+        &mut self.aps
+    }
+    fn get_nwk(&self) -> &impl JoinedNwk<D, S> {
+        &self.aps.nwk
+    }
+    fn get_nwk_mut(&mut self) -> &mut impl JoinedNwk<D, S> {
+        &mut self.aps.nwk
+    }
+    fn get_zcl_transaction_number(&mut self) -> u8 {
+        self.zcl_transaction_number.wrapping_add(1)
+    }
 
     fn to_unjoined_ctx(self) -> UnjoinedCtx<D, S> {
-        UnjoinedCtx {
-            nwk: self.aps.nwk.reset(),
-            aps_storage: self.aps.stg,
-        }
+        UnjoinedCtx { nwk: self.aps.nwk.reset(), aps_storage: self.aps.stg }
     }
 
     fn to_pending_rejoin_ctx(self) -> PendingRejoinCtx<D, S> {
-        PendingRejoinCtx {
-            nwk: self.aps.nwk.to_pending_rejoin(),
-            aps_storage: self.aps.stg,
-        }
+        PendingRejoinCtx { nwk: self.aps.nwk.to_pending_rejoin(), aps_storage: self.aps.stg }
     }
 }
 
-pub struct RouterNodeCtx<D: NwkMac, S: StorageRegion> where Aps<Nwk<JoinedAsRouter, D, S>, D, S>: ApsListen {
+pub struct RouterNodeCtx<D: NwkMac, S: StorageRegion>
+where
+    Aps<Nwk<JoinedAsRouter, D, S>, D, S>: ApsListen,
+{
     zcl_transaction_number: u8,
-    pub aps: Aps<Nwk<JoinedAsRouter, D, S>, D, S>
+    pub aps: Aps<Nwk<JoinedAsRouter, D, S>, D, S>,
 }
 impl<D: NwkMac, S: StorageRegion> ZbNodeStatus for RouterNodeCtx<D, S> {}
 impl<D: NwkMac, S: StorageRegion> ZbNodeJoinedStatus<D, S> for RouterNodeCtx<D, S> {
-    fn get_aps(&self) -> &(impl Apsde + Apsme + ApsmeSecurity) { &self.aps }
-    fn get_aps_mut(&mut self) -> &mut (impl Apsde + Apsme + ApsmeSecurity) { &mut self.aps }
-    fn get_nwk(&self) -> &impl JoinedNwk<D, S> { &self.aps.nwk }
-    fn get_nwk_mut(&mut self) -> &mut impl JoinedNwk<D, S> { &mut self.aps.nwk }
-    fn get_zcl_transaction_number(&mut self) -> u8 { self.zcl_transaction_number.wrapping_add(1) }
+    fn get_aps(&self) -> &(impl Apsde + Apsme + ApsmeSecurity) {
+        &self.aps
+    }
+    fn get_aps_mut(&mut self) -> &mut (impl Apsde + Apsme + ApsmeSecurity) {
+        &mut self.aps
+    }
+    fn get_nwk(&self) -> &impl JoinedNwk<D, S> {
+        &self.aps.nwk
+    }
+    fn get_nwk_mut(&mut self) -> &mut impl JoinedNwk<D, S> {
+        &mut self.aps.nwk
+    }
+    fn get_zcl_transaction_number(&mut self) -> u8 {
+        self.zcl_transaction_number.wrapping_add(1)
+    }
 
     fn to_unjoined_ctx(self) -> UnjoinedCtx<D, S> {
-        UnjoinedCtx {
-            nwk: self.aps.nwk.reset(),
-            aps_storage: self.aps.stg,
-        }
+        UnjoinedCtx { nwk: self.aps.nwk.reset(), aps_storage: self.aps.stg }
     }
 
     fn to_pending_rejoin_ctx(self) -> PendingRejoinCtx<D, S> {
-        PendingRejoinCtx {
-            nwk: self.aps.nwk.to_pending_rejoin(),
-            aps_storage: self.aps.stg,
-        }
+        PendingRejoinCtx { nwk: self.aps.nwk.to_pending_rejoin(), aps_storage: self.aps.stg }
     }
 }
 
@@ -125,7 +147,7 @@ pub struct ZbNode<C: ZbNodeStatus, D: NwkMac, S: StorageRegion> {
     pub spawner: embassy_executor::Spawner,
     pub applications: ZbApplications<S>,
 
-    pub ctx: C
+    pub ctx: C,
 }
 
 pub async fn run<D, P, S>(
@@ -141,7 +163,7 @@ where
     S: StorageRegion,
 {
     async fn join<Dd, Ss>(
-        mut unjoined: ZbNode<UnjoinedCtx<Dd, Ss>, Dd, Ss>
+        mut unjoined: ZbNode<UnjoinedCtx<Dd, Ss>, Dd, Ss>,
     ) -> Either<ZbNode<EndDeviceNodeCtx<Dd, Ss>, Dd, Ss>, ZbNode<RouterNodeCtx<Dd, Ss>, Dd, Ss>>
     where
         Dd: NwkMac,
@@ -177,14 +199,14 @@ where
                 InitializedNode::Unjoined(unjoined) => join(unjoined).await,
                 InitializedNode::JoinedAsEndDevice(joined) => Either::First(joined),
                 InitializedNode::JoinedAsRouter(joined) => Either::Second(joined),
-            }
+            },
         };
     }
 }
 
 async fn try_rejoin<D, S>(
     node: ZbNode<PendingRejoinCtx<D, S>, D, S>,
-    config: ZbConfig
+    config: ZbConfig,
 ) -> InitializedNode<D, S>
 where
     D: NwkMac,
@@ -202,60 +224,47 @@ where
     };
 
     match nwk.rejoin(&request).await {
-        Ok(nwk) => {
-            match nwk {
-                zb_types::transitions::Either::First(nwk) => {
-                    let aps = Aps::load_or_default(nwk, node.ctx.aps_storage);
+        Ok(nwk) => match nwk {
+            zb_types::transitions::Either::First(nwk) => {
+                let aps = Aps::load_or_default(nwk, node.ctx.aps_storage);
 
-                    let mut node = ZbNode {
-                        _marker: Default::default(),
-                        config,
-                        spawner: node.spawner,
-                        applications: node.applications,
-                        ctx: EndDeviceNodeCtx {
-                            zcl_transaction_number: 0,
-                            aps,
-                        },
-                    };
+                let mut node = ZbNode {
+                    _marker: Default::default(),
+                    config,
+                    spawner: node.spawner,
+                    applications: node.applications,
+                    ctx: EndDeviceNodeCtx { zcl_transaction_number: 0, aps },
+                };
 
-                    node.emit_device_annce().await.ok();
-                    node.ctx.aps.persist().ok();
+                node.emit_device_annce().await.ok();
+                node.ctx.aps.persist().ok();
 
-                    InitializedNode::JoinedAsEndDevice(node)
-                },
-                zb_types::transitions::Either::Second(nwk) => {
-                    let aps = Aps::load_or_default(nwk, node.ctx.aps_storage);
-
-                    let mut node = ZbNode {
-                        _marker: Default::default(),
-                        config,
-                        spawner: node.spawner,
-                        applications: node.applications,
-                        ctx: RouterNodeCtx {
-                            zcl_transaction_number: 0,
-                            aps,
-                        },
-                    };
-
-                    node.emit_device_annce().await.ok();
-                    node.ctx.aps.persist().ok();
-
-                    InitializedNode::JoinedAsRouter(node)
-                }
+                InitializedNode::JoinedAsEndDevice(node)
             }
-        }
-        Err(err) => {
-            InitializedNode::Unjoined(ZbNode::<UnjoinedCtx<D, S>, D, S> {
-                _marker: Default::default(),
-                config,
-                spawner: node.spawner,
-                applications: node.applications,
-                ctx: UnjoinedCtx {
-                    nwk: err.state.reset(),
-                    aps_storage: node.ctx.aps_storage,
-                },
-            })
-        }
+            zb_types::transitions::Either::Second(nwk) => {
+                let aps = Aps::load_or_default(nwk, node.ctx.aps_storage);
+
+                let mut node = ZbNode {
+                    _marker: Default::default(),
+                    config,
+                    spawner: node.spawner,
+                    applications: node.applications,
+                    ctx: RouterNodeCtx { zcl_transaction_number: 0, aps },
+                };
+
+                node.emit_device_annce().await.ok();
+                node.ctx.aps.persist().ok();
+
+                InitializedNode::JoinedAsRouter(node)
+            }
+        },
+        Err(err) => InitializedNode::Unjoined(ZbNode::<UnjoinedCtx<D, S>, D, S> {
+            _marker: Default::default(),
+            config,
+            spawner: node.spawner,
+            applications: node.applications,
+            ctx: UnjoinedCtx { nwk: err.state.reset(), aps_storage: node.ctx.aps_storage },
+        }),
     }
 }
 
@@ -298,10 +307,7 @@ where
                     config,
                     spawner,
                     applications: apps,
-                    ctx: PendingRejoinCtx {
-                        nwk,
-                        aps_storage: aps_stg,
-                    },
+                    ctx: PendingRejoinCtx { nwk, aps_storage: aps_stg },
                 };
 
                 try_rejoin(node, config).await
@@ -313,13 +319,10 @@ where
                     config,
                     spawner,
                     applications: apps,
-                    ctx: RouterNodeCtx {
-                        zcl_transaction_number: 0,
-                        aps,
-                    },
+                    ctx: RouterNodeCtx { zcl_transaction_number: 0, aps },
                 })
             }
-        },
+        }
         Err(cfg) => {
             if config.is_router_or_coordinator() && config.touchlink_supported {
                 // select a channel from bdbcTLPrimaryChannelSet
@@ -344,11 +347,11 @@ where
     }
 }
 
-type ZbNodeTransition<D, S> =
-    TransitionResult<
-        ZbNode<UnjoinedCtx<D, S>, D, S>,
-        Either<ZbNode<EndDeviceNodeCtx<D, S>, D, S>, ZbNode<RouterNodeCtx<D, S>, D, S>>,
-        ()>;
+type ZbNodeTransition<D, S> = TransitionResult<
+    ZbNode<UnjoinedCtx<D, S>, D, S>,
+    Either<ZbNode<EndDeviceNodeCtx<D, S>, D, S>, ZbNode<RouterNodeCtx<D, S>, D, S>>,
+    (),
+>;
 
 impl<D, S> ZbNode<UnjoinedCtx<D, S>, D, S>
 where
@@ -373,30 +376,23 @@ where
             }
         }
 
-        Err(TransitionError {
-            state: self,
-            error: (),
-        })
+        Err(TransitionError { state: self, error: () })
     }
 
     async fn try_join_for_channels(mut self, scan_channels: ChannelMask) -> ZbNodeTransition<D, S> {
-        let request = ScanRequest {
-            channel_masks: &[scan_channels],
-            duration: self.config.scan_duration,
-        };
+        let request =
+            ScanRequest { channel_masks: &[scan_channels], duration: self.config.scan_duration };
 
-        let result = match self.ctx.nwk.network_discovery(&request).await {
+        let mut result = match self.ctx.nwk.network_discovery(&request).await {
             Ok(value) => value,
-            Err(_) => {
-                return TransitionError::err(self, ())
-            }
+            Err(_) => return TransitionError::err(self, ()),
         };
 
-        for nd in result.iter().filter(|nd| nd.is_permit_joining()) {
+        for nd in result.iter_mut().filter(|nd| nd.is_permit_joining()) {
             let mut retry_counter = 0;
             while retry_counter < REC_SAME_NETWORK_RETRY_ATTEMPTS {
                 let req = NlmeAssociationJoinRequest {
-                    capability_information: self.config.get_capabilities()
+                    capability_information: self.config.get_capabilities(),
                 };
 
                 log::warn!("trying to connect to nd: {:?}", nd);
@@ -411,10 +407,7 @@ where
                                     config: self.config,
                                     spawner: self.spawner,
                                     applications: self.applications,
-                                    ctx: EndDeviceNodeCtx {
-                                        zcl_transaction_number: 0,
-                                        aps,
-                                    },
+                                    ctx: EndDeviceNodeCtx { zcl_transaction_number: 0, aps },
                                 };
 
                                 match node.try_authenticate().await {
@@ -430,21 +423,18 @@ where
                                     config: self.config,
                                     spawner: self.spawner,
                                     applications: self.applications,
-                                    ctx: RouterNodeCtx {
-                                        zcl_transaction_number: 0,
-                                        aps,
-                                    },
+                                    ctx: RouterNodeCtx { zcl_transaction_number: 0, aps },
                                 };
 
                                 match node.try_authenticate().await {
                                     Ok(node) => {
                                         // Activate permit joining
                                         Ok(Either::Second(node))
-                                    },
+                                    }
                                     Err(node) => TransitionError::err(node, ()),
                                 }
                             }
-                        }
+                        };
                     }
                     Err(err) => {
                         self.ctx.nwk = err.state;
@@ -465,7 +455,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             config: self.config,
             spawner: self.spawner,
             applications: self.applications,
-            ctx: self.ctx.to_unjoined_ctx()
+            ctx: self.ctx.to_unjoined_ctx(),
         }
     }
 
@@ -475,11 +465,13 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             config: self.config,
             spawner: self.spawner,
             applications: self.applications,
-            ctx: self.ctx.to_pending_rejoin_ctx()
+            ctx: self.ctx.to_pending_rejoin_ctx(),
         }
     }
 
-    pub fn get_zcl_transaction_number(&mut self) -> u8 { self.ctx.get_zcl_transaction_number() }
+    pub fn get_zcl_transaction_number(&mut self) -> u8 {
+        self.ctx.get_zcl_transaction_number()
+    }
 
     async fn try_authenticate(mut self) -> Result<Self, ZbNode<UnjoinedCtx<D, S>, D, S>> {
         log::info!("NLME-JOIN successful, waiting for network key...");
@@ -503,14 +495,20 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                 return Err(self.to_unjoined());
             }
 
-            log::info!("security_network_params: {:?}", self.ctx.get_aps().get_security_network_params());
+            log::info!(
+                "security_network_params: {:?}",
+                self.ctx.get_aps().get_security_network_params()
+            );
             match self.ctx.get_aps().get_security_network_params() {
                 SecurityNetworkParams::Centralized(_) => {
                     log::info!("updating trust center link key");
                     match self.update_trust_center_link_key().await {
                         Ok(_) => {}
                         Err(err) => {
-                            log::warn!("couldn't update trust center link key, got error: `{:?}`. Resetting...", err);
+                            log::warn!(
+                                "couldn't update trust center link key, got error: `{:?}`. Resetting...",
+                                err
+                            );
                             self.ctx.get_nwk_mut().leave(false).await.ok();
                             return Err(ZbNode {
                                 _marker: Default::default(),
@@ -525,10 +523,11 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                 SecurityNetworkParams::Distributed => {}
             }
 
-            match self.emit_permit_joining_req(
-                MgmtPermitJoiningReq::Enable(MIN_COMMISSIONING_TIME.as_secs() as u8),
-                ApsdeAddress::Network(NwkAddress::BROADCAST_ALL, ZDP_ENDPOINT),
-            )
+            match self
+                .emit_permit_joining_req(
+                    MgmtPermitJoiningReq::Enable(MIN_COMMISSIONING_TIME.as_secs() as u8),
+                    ApsdeAddress::Network(NwkAddress::BROADCAST_ALL, ZDP_ENDPOINT),
+                )
                 .await
             {
                 Err(err) => log::warn!("error sending MgmtPermitJoiningReq: {:?}", err),
@@ -536,23 +535,26 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             };
 
             Ok(self)
-        }
+        };
     }
 
     async fn wait_for_nwk_key(&mut self) -> Result<(), TimeoutError> {
         let timeout = self.ctx.get_nwk().get_profile().aps_security_timeout_period;
 
-        let (ext_src_addr, key_data) =
-            self.ctx.get_aps_mut().wait_for_indication(timeout, |indication| match indication {
+        let (ext_src_addr, key_data) = self
+            .ctx
+            .get_aps_mut()
+            .wait_for_indication(timeout, |indication| match indication {
                 ApsIndication::TransportKey(ApsmeTransportKeyIndication {
-                                                ext_src_addr,
-                                                transport_key: TransportKeyData::StandardNetworkKey(key_data),
-                                            }) => Some((*ext_src_addr, *key_data)),
+                    ext_src_addr,
+                    transport_key: TransportKeyData::StandardNetworkKey(key_data),
+                }) => Some((*ext_src_addr, *key_data)),
                 _ => None,
             })
-                .await?;
+            .await?;
 
-        match self.ctx
+        match self
+            .ctx
             .get_aps_mut()
             .get_device_key_pair_set_mut()
             .iter_mut()
@@ -572,7 +574,8 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                     incoming_frame_counter_set: Default::default(),
                     key: key_data.key,
                     network_key_type: NetworkKeyType::Standard,
-                }).ok();
+                })
+                .ok();
             });
         }
 
@@ -584,22 +587,25 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         self.ctx.get_aps_mut().request_key(tc_addr, RequestKeyType::TrustCenterLinkKey).await?;
 
         let timeout = self.ctx.get_nwk().get_profile().aps_security_timeout_period;
-        let (ext_src_addr, key_data) =
-            self.ctx.get_aps_mut().wait_for_indication(timeout, |indication| match indication {
-                ApsIndication::TransportKey(
-                    ApsmeTransportKeyIndication {
-                        ext_src_addr,
-                        transport_key: TransportKeyData::TrustCenterLinkKey(key_data),
-                        ..
-                    }
-                ) => Some((*ext_src_addr, *key_data)),
+        let (ext_src_addr, key_data) = self
+            .ctx
+            .get_aps_mut()
+            .wait_for_indication(timeout, |indication| match indication {
+                ApsIndication::TransportKey(ApsmeTransportKeyIndication {
+                    ext_src_addr,
+                    transport_key: TransportKeyData::TrustCenterLinkKey(key_data),
+                    ..
+                }) => Some((*ext_src_addr, *key_data)),
                 _ => None,
-            }).await.map_err(|err| {
+            })
+            .await
+            .map_err(|err| {
                 log::warn!("error receiving transport_key: {:?}", err);
                 ApsmeSecurityError::CommandValidationError
             })?;
 
-        let desc = self.ctx
+        let desc = self
+            .ctx
             .get_aps_mut()
             .get_device_key_pair_set_mut()
             .iter_mut()
@@ -612,10 +618,13 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
 
         self.ctx.get_aps_mut().verify_key().await?;
 
-        let indication = self.ctx.get_aps_mut().wait_for_indication(timeout, |indication| match indication {
-            ApsIndication::ConfirmKey(indication) => Some(*indication),
-            _ => None,
-        })
+        let indication = self
+            .ctx
+            .get_aps_mut()
+            .wait_for_indication(timeout, |indication| match indication {
+                ApsIndication::ConfirmKey(indication) => Some(*indication),
+                _ => None,
+            })
             .await
             .map_err(|err| {
                 log::warn!("error waiting for confirmation: {:?}", err);
@@ -631,14 +640,15 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
 }
 
 impl<D: NwkMac, S: StorageRegion> ZbNode<EndDeviceNodeCtx<D, S>, D, S> {
-    pub async fn start(self) -> Either<ZbNode<UnjoinedCtx<D, S>, D, S>, ZbNode<PendingRejoinCtx<D, S>, D, S>> {
+    pub async fn start(
+        self,
+    ) -> Either<ZbNode<UnjoinedCtx<D, S>, D, S>, ZbNode<PendingRejoinCtx<D, S>, D, S>> {
         let source = self.ctx.aps.nwk.get_addr();
         let source_ieee = self.ctx.aps.nwk.get_ext_addr();
         let security_level = self.ctx.aps.nwk.get_profile().nwk_security_level;
         let sequence_number = self.ctx.aps.nwk.get_seq_number();
-        let (parent_addr, parent_ext_addr) = self.ctx.aps.nwk.lock_neighbors(|nbs| {
-            (nbs.parent.nwk_addr, nbs.parent.ext_addr)
-        });
+        let (parent_addr, parent_ext_addr) =
+            self.ctx.aps.nwk.lock_neighbors(|nbs| (nbs.parent.nwk_addr, nbs.parent.ext_addr));
         let keys = self.ctx.aps.nwk.get_security_material_set();
         let active_key_seq_number = self.ctx.aps.nwk.get_active_key_seq_number();
 
@@ -671,7 +681,9 @@ impl<D: NwkMac, S: StorageRegion> ZbNode<EndDeviceNodeCtx<D, S>, D, S> {
 }
 
 impl<D: NwkMac, S: StorageRegion> ZbNode<RouterNodeCtx<D, S>, D, S> {
-    pub async fn start(self) -> Either<ZbNode<UnjoinedCtx<D, S>, D, S>, ZbNode<PendingRejoinCtx<D, S>, D, S>> {
+    pub async fn start(
+        self,
+    ) -> Either<ZbNode<UnjoinedCtx<D, S>, D, S>, ZbNode<PendingRejoinCtx<D, S>, D, S>> {
         let source = self.ctx.aps.nwk.get_addr();
         let source_ieee = self.ctx.aps.nwk.get_ext_addr();
         let security_level = self.ctx.aps.nwk.get_profile().nwk_security_level;
@@ -706,10 +718,14 @@ impl<D: NwkMac, S: StorageRegion> ZbNode<RouterNodeCtx<D, S>, D, S> {
     }
 }
 
-
-
 impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
-    async fn get_report(&self) -> zb_types::HashMap<(ApsEndpoint, u16, u16), ReportAttributesCommand, MAX_ATTRIBUTES_PER_CLUSTER> {
+    async fn get_report(
+        &self,
+    ) -> zb_types::HashMap<
+        (ApsEndpoint, u16, u16),
+        ReportAttributesCommand,
+        MAX_ATTRIBUTES_PER_CLUSTER,
+    > {
         let mut responses = zb_types::HashMap::new();
 
         for (ep, application) in self.applications.iter() {
@@ -751,15 +767,14 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                     match indication.dst {
                         ApsAddress::Network(_, endpoint) => {
                             if endpoint == ZDP_ENDPOINT {
-                                _ = self.handle_zdp_command(&indication)
-                                    .await
-                                    .map_err(|err| log::warn!("error handling zdp_command: {:?}", err));
+                                _ = self.handle_zdp_command(&indication).await.map_err(|err| {
+                                    log::warn!("error handling zdp_command: {:?}", err)
+                                });
                             } else {
-                                _ = self.handle_zcl_command(endpoint, &indication)
-                                    .await
-                                    .map_err(|err| log::warn!("error handling zcl_command: {:?}", err));
+                                _ = self.handle_zcl_command(endpoint, &indication).await.map_err(
+                                    |err| log::warn!("error handling zcl_command: {:?}", err),
+                                );
                             }
-
                         }
                         _ => {}
                     };
@@ -772,41 +787,43 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             }
         }
     }
-
 }
 
 async fn listen_task<D: NwkMac, S: StorageRegion, C: ZbNodeJoinedStatus<D, S>>(
-    mut node: ZbNode<C, D, S>
+    mut node: ZbNode<C, D, S>,
 ) -> Either<ZbNode<UnjoinedCtx<D, S>, D, S>, ZbNode<PendingRejoinCtx<D, S>, D, S>> {
     loop {
-        let indication = node.listen()
-            .with_timeout(Duration::from_secs(1))
-            .await;
+        let indication = node.listen().with_timeout(Duration::from_secs(1)).await;
         match indication {
-            Ok(indication) => return match indication {
-                NlmeLeaveIndication::LeaveSelf { .. } => Either::First(node.to_unjoined()),
-                NlmeLeaveIndication::LeaveChild { .. } => Either::Second(node.to_pending_rejoin()),
-                _ => todo!()
-            },
+            Ok(indication) => {
+                return match indication {
+                    NlmeLeaveIndication::LeaveSelf { .. } => Either::First(node.to_unjoined()),
+                    NlmeLeaveIndication::LeaveChild { .. } => {
+                        Either::Second(node.to_pending_rejoin())
+                    }
+                    _ => todo!(),
+                };
+            }
             Err(_) => {}
         };
 
         let reports = node.get_report().await;
         {
             for ((src_endpoint, profile_id, cluster_id), cmd) in reports {
-                _ = node.emit_report_attributes(
-                    cmd,
-                    EmitCommandFrameCfg {
-                        direction: ZclDirection::ClientToServer,
-                        ..Default::default()
-                    },
-                    RequestCfg {
-                        dst_address: Default::default(),
-                        profile_id,
-                        cluster_id,
-                        src_endpoint,
-                    },
-                )
+                _ = node
+                    .emit_report_attributes(
+                        cmd,
+                        EmitCommandFrameCfg {
+                            direction: ZclDirection::ClientToServer,
+                            ..Default::default()
+                        },
+                        RequestCfg {
+                            dst_address: Default::default(),
+                            profile_id,
+                            cluster_id,
+                            src_endpoint,
+                        },
+                    )
                     .await;
             }
         }

@@ -33,9 +33,11 @@ use crate::apl::aps::security::types::common::StandardNetworkKeyDescriptor;
 use crate::apl::aps::security::types::common::TransportKeyData;
 use crate::apl::aps::security::types::common::TrustCenterLinkKeyData;
 use crate::apl::aps::security::types::common::TrustCenterLinkKeyDescriptor;
-use crate::apl::aps::security::types::indications::{ApsmeConfirmKeyIndication, ApsmeRemoveDeviceIndication};
 use crate::apl::aps::security::types::indications::ApsmeTransportKeyIndication;
 use crate::apl::aps::security::types::indications::ApsmeUpdateDeviceIndication;
+use crate::apl::aps::security::types::indications::{
+    ApsmeConfirmKeyIndication, ApsmeRemoveDeviceIndication,
+};
 use crate::apl::aps::types::ApsIndication;
 use crate::apl::aps::types::TxOptions;
 use crate::common::security::SecurityError;
@@ -47,12 +49,12 @@ use crate::common::security::primitives::CcmZigbee;
 use crate::common::security::primitives::HmacAes128Mmo;
 use crate::common::security::primitives::write_and_encrypt_in_place;
 use crate::nwk::constants::NWK_COORDINATOR_ADDRESS;
+use crate::nwk::ctx::{InitializedNwk, JoinedAsRouter, JoinedNwk, Nwk};
 use crate::nwk::nlde::NldeDataIndicationDstAddress;
 use crate::unwrap_or_return;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::nwk::ctx::{BaseNwk, InitializedNwk, JoinedAsRouter, JoinedNwk, JoinedState, Nwk, RoutingNwk, RoutingState};
 
 pub type UpdateDeviceRequest = UpdateDeviceCommand;
 pub type ApsSecurityResult = Result<(), ApsmeSecurityError>;
@@ -69,7 +71,7 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> ApsmeSecurity for Aps<T, D
                     key: tk_data.key,
                     sequence_number: tk_data.key_sequence,
                     destination_address: dst_addr,
-                    source_address: self.nwk.get_ext_addr()
+                    source_address: self.nwk.get_ext_addr(),
                 }),
                 tk_data.parent_address.unwrap_or(dst_addr),
             ),
@@ -91,14 +93,16 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> ApsmeSecurity for Aps<T, D
             ),
         };
 
-        let command = ApsCommand::TransportKey(TransportKeyCommand {
-            key_descriptor: descriptor,
-        });
+        let command = ApsCommand::TransportKey(TransportKeyCommand { key_descriptor: descriptor });
 
         self.send_apsme_security_command(dest_address, command).await
     }
 
-    async fn update_device(&mut self, dst_addr: ExtendedAddress, req: UpdateDeviceRequest) -> ApsSecurityResult {
+    async fn update_device(
+        &mut self,
+        dst_addr: ExtendedAddress,
+        req: UpdateDeviceRequest,
+    ) -> ApsSecurityResult {
         let command = ApsCommand::UpdateDevice(req);
         self.send_apsme_security_command(dst_addr, command).await
     }
@@ -126,19 +130,15 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> ApsmeSecurity for Aps<T, D
         dest_address: ExtendedAddress,
         key_sequence_number: u8,
     ) -> Result<(), ApsmeSecurityError> {
-        let cmd = ApsCommand::SwitchKey(SwitchKeyCommand {
-            sequence_number: key_sequence_number,
-        });
+        let cmd = ApsCommand::SwitchKey(SwitchKeyCommand { sequence_number: key_sequence_number });
 
         if dest_address != ExtendedAddress::MAX {
             self.send_apsme_security_command(dest_address, cmd).await
         } else {
             let nwk_address = NwkAddress(0xfffd);
 
-            let frame = ApsCommandFrame::new(ApsCommandFrameCtr {
-                dst_addr: nwk_address,
-                command: cmd,
-            });
+            let frame =
+                ApsCommandFrame::new(ApsCommandFrameCtr { dst_addr: nwk_address, command: cmd });
 
             self.aps_cmd_transfer(frame, nwk_address, TxOptions::default())
                 .await
@@ -148,25 +148,24 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> ApsmeSecurity for Aps<T, D
 
     async fn verify_key(&mut self) -> ApsSecurityResult {
         // TODO: check if we are the trust center and ignore if so
-        let tc_addr = if let SecurityNetworkParams::Centralized(ext_addr) = self.security_network_params
-        {
-            ext_addr
-        } else {
-            log::warn!("[VERIFY-KEY] can't verify key, not in a centralized network");
-            return Err(ApsmeSecurityError::CommandValidationError);
-        };
+        let tc_addr =
+            if let SecurityNetworkParams::Centralized(ext_addr) = self.security_network_params {
+                ext_addr
+            } else {
+                log::warn!("[VERIFY-KEY] can't verify key, not in a centralized network");
+                return Err(ApsmeSecurityError::CommandValidationError);
+            };
 
-        let key_descriptor = self
-            .device_key_pair_set
-            .iter()
-            .find(|key| key.device_address == tc_addr)
-            .ok_or_else(|| {
-                log::warn!("[VERIFY-KEY] could not find key pair associated with trust center");
-                ApsmeSecurityError::CommandValidationError
-            })?;
+        let key_descriptor =
+            self.device_key_pair_set.iter().find(|key| key.device_address == tc_addr).ok_or_else(
+                || {
+                    log::warn!("[VERIFY-KEY] could not find key pair associated with trust center");
+                    ApsmeSecurityError::CommandValidationError
+                },
+            )?;
 
-        let initiator_verify_key_hash = HmacAes128Mmo::hmac(&key_descriptor.link_key.as_slice(), &[0x03])
-            .map_err(|_| {
+        let initiator_verify_key_hash =
+            HmacAes128Mmo::hmac(&key_descriptor.link_key.as_slice(), &[0x03]).map_err(|_| {
                 log::warn!("[VERIFY-KEY] hmac verification failed");
                 ApsmeSecurityError::CommandValidationError
             })?;
@@ -177,18 +176,13 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> ApsmeSecurity for Aps<T, D
             initiator_hash_value: *initiator_verify_key_hash.as_array(),
         });
 
-        let nwk_address = self
-            .nwk
-            .find_nwk_addr(tc_addr)
-            .ok_or_else(|| {
-                log::warn!("[VERIFY-KEY] could not find network address associated with trust center");
-                ApsmeSecurityError::ApsdeSapError(ApsdeError::NoShortAddress)
-            })?;
+        let nwk_address = self.nwk.find_nwk_addr(tc_addr).ok_or_else(|| {
+            log::warn!("[VERIFY-KEY] could not find network address associated with trust center");
+            ApsmeSecurityError::ApsdeSapError(ApsdeError::NoShortAddress)
+        })?;
 
-        let frame = ApsCommandFrame::new(ApsCommandFrameCtr {
-            dst_addr: nwk_address,
-            command: cmd,
-        });
+        let frame =
+            ApsCommandFrame::new(ApsCommandFrameCtr { dst_addr: nwk_address, command: cmd });
 
         self.aps_cmd_transfer(frame, nwk_address, TxOptions::default())
             .await
@@ -249,16 +243,10 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
                 ApsmeSecurityError::ApsdeSapError(ApsdeError::NoShortAddress)
             })?;
 
-        let frame = ApsCommandFrame::new(ApsCommandFrameCtr {
-            dst_addr: nwk_address,
-            command: cmd,
-        });
+        let frame =
+            ApsCommandFrame::new(ApsCommandFrameCtr { dst_addr: nwk_address, command: cmd });
 
-        log::info!(
-        "nwk_address: {:?}, dest_address: {:?}",
-        nwk_address,
-        dest_address
-    );
+        log::info!("nwk_address: {:?}, dest_address: {:?}", nwk_address, dest_address);
         self.aps_cmd_transfer(frame, nwk_address, TxOptions::SECURE_CMD)
             .await
             .map_err(ApsmeSecurityError::from)
@@ -271,11 +259,11 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
         key_pair: Option<DeviceKeyPairDescriptor>,
     ) -> Result<(), ApsmeSecurityError> {
         if !matches!(
-        frame.command,
-        ApsCommand::TransportKey(_) | ApsCommand::UpdateDevice(_) |
+            frame.command,
+            ApsCommand::TransportKey(_) | ApsCommand::UpdateDevice(_) |
     ApsCommand::RemoveDevice(_) | ApsCommand::RequestKey(_) | ApsCommand::SwitchKey(_) |
     /*ApsCommand::TunnelData(_) | */ ApsCommand::VerifyKey(_) | ApsCommand::ConfirmKey(_)
-    ) {
+        ) {
             // not a security command, ignore
             return Ok(());
         }
@@ -285,7 +273,7 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
         if self.config.get_server_mask().primary_trust_center {
             return Ok(()); // we are the trust center, ignore validation
         }
-        
+
          */
 
         let tc_addr = unwrap_or_return!(self.get_tc_addr(), Ok(()));
@@ -300,17 +288,18 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
                 log::warn!(
                     "[VALIDATE-APSME-COMMAND] invalid command received: received command \
                     from {:?}, which is not the trust center",
-                    key_pair.device_address);
+                    key_pair.device_address
+                );
                 return Err(ApsmeSecurityError::CommandValidationError);
             }
         } else {
             if matches!(
-            frame.command,
-            ApsCommand::TransportKey(_)
-                | ApsCommand::RemoveDevice(_)
-                | ApsCommand::RequestKey(_)
-                | ApsCommand::ConfirmKey(_)
-        ) {
+                frame.command,
+                ApsCommand::TransportKey(_)
+                    | ApsCommand::RemoveDevice(_)
+                    | ApsCommand::RequestKey(_)
+                    | ApsCommand::ConfirmKey(_)
+            ) {
                 log::warn!("[VALIDATE-APSME-COMMAND] encryption required for {:?}", frame.command);
                 return Err(ApsmeSecurityError::CommandValidationError); // encryption required for these commands
             }
@@ -320,8 +309,11 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
             match frame.command {
                 ApsCommand::VerifyKey(VerifyKeyCommand { source_address, .. }) => {
                     if source_address != tc_addr {
-                        log::warn!("[VALIDATE-APSME-COMMAND] verify key command received \
-                            from {:?}, which is not the trust center", source_address);
+                        log::warn!(
+                            "[VALIDATE-APSME-COMMAND] verify key command received \
+                            from {:?}, which is not the trust center",
+                            source_address
+                        );
                         return Err(ApsmeSecurityError::CommandValidationError);
                     }
                 }
@@ -347,9 +339,10 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
 
         if matches!(
             desc,
-            StandardKeyDescriptor::ApplicationLinkKey(_) | StandardKeyDescriptor::TrustCenterLinkKey(_)
+            StandardKeyDescriptor::ApplicationLinkKey(_)
+                | StandardKeyDescriptor::TrustCenterLinkKey(_)
         ) && self.is_authorized()
-                && !hdr.frame_control.security
+            && !hdr.frame_control.security
         {
             return None;
         }
@@ -368,21 +361,22 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
                     if dest == ExtendedAddress::MAX {
                         self.security_network_params = SecurityNetworkParams::Distributed;
                     } else {
-                        self.security_network_params = SecurityNetworkParams::Centralized(desc.source_address);
+                        self.security_network_params =
+                            SecurityNetworkParams::Centralized(desc.source_address);
 
-                        self.nwk
-                            .get_addr_map_mut()
-                            .insert(src_address, desc.source_address);
+                        self.nwk.get_addr_map_mut().insert(src_address, desc.source_address);
                         log::info!("22: {:?}", self.nwk.get_addr_map());
                     }
 
                     return Some(ApsIndication::TransportKey(ApsmeTransportKeyIndication {
                         ext_src_addr: desc.source_address,
-                        transport_key: TransportKeyData::StandardNetworkKey(StandardNetworkKeyData {
-                            key: desc.key,
-                            key_sequence: desc.sequence_number,
-                            parent_address: None,
-                        }),
+                        transport_key: TransportKeyData::StandardNetworkKey(
+                            StandardNetworkKeyData {
+                                key: desc.key,
+                                key_sequence: desc.sequence_number,
+                                parent_address: None,
+                            },
+                        ),
                     }));
                 }
 
@@ -404,9 +398,9 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
                 if desc.destination_address == self.nwk.get_ext_addr() {
                     Some(ApsIndication::TransportKey(ApsmeTransportKeyIndication {
                         ext_src_addr: desc.source_address,
-                        transport_key: TransportKeyData::TrustCenterLinkKey(TrustCenterLinkKeyData {
-                            key: desc.key,
-                        }),
+                        transport_key: TransportKeyData::TrustCenterLinkKey(
+                            TrustCenterLinkKeyData { key: desc.key },
+                        ),
                     }))
                 } else {
                     None
@@ -430,27 +424,15 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
         }))
     }
 
-    pub fn handle_request_key_command(
-        &self,
-        src_addr: NwkAddress,
-        cmd: &RequestKeyCommand,
-    ) -> () {
+    pub fn handle_request_key_command(&self, src_addr: NwkAddress, cmd: &RequestKeyCommand) -> () {
         // TODO
     }
 
-    pub fn handle_switch_key_command(
-        &self,
-        src_addr: NwkAddress,
-        cmd: &SwitchKeyCommand,
-    ) -> () {
+    pub fn handle_switch_key_command(&self, src_addr: NwkAddress, cmd: &SwitchKeyCommand) -> () {
         // TODO
     }
 
-    pub fn handle_verify_key_command(
-        &self,
-        src_addr: NwkAddress,
-        cmd: &VerifyKeyCommand,
-    ) -> () {
+    pub fn handle_verify_key_command(&self, src_addr: NwkAddress, cmd: &VerifyKeyCommand) -> () {
         // TODO
     }
 
@@ -479,12 +461,12 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
 
         // TODO: check fi we are the trust center and drop indication if so
 
-        let tc_addr = if let SecurityNetworkParams::Centralized(ext_addr) = self.security_network_params
-        {
-            ext_addr
-        } else {
-            return None;
-        };
+        let tc_addr =
+            if let SecurityNetworkParams::Centralized(ext_addr) = self.security_network_params {
+                ext_addr
+            } else {
+                return None;
+            };
 
         if indication.status != ConfirmKeyStatus::Success
             || indication.key_type != StandardKeyType::TrustCenterLinkKey
@@ -494,10 +476,8 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
             return None;
         }
 
-        let key_descriptor = self
-            .device_key_pair_set
-            .iter_mut()
-            .find(|key| key.device_address == tc_addr)?;
+        let key_descriptor =
+            self.device_key_pair_set.iter_mut().find(|key| key.device_address == tc_addr)?;
 
         key_descriptor.key_attributes = KeyAttribute::VerifiedKey;
         key_descriptor.incoming_frame_counter = 0;
@@ -524,10 +504,7 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
         let (aps_hdr, _) = ApsHeader::try_read(hdr_buf, byte::LE)?;
 
         if !aps_hdr.frame_control.security {
-            return Ok((
-                ApsFrame::from_payload(aps_hdr, &frame_buffer[aps_hdr_len..])?,
-                None,
-            ));
+            return Ok((ApsFrame::from_payload(aps_hdr, &frame_buffer[aps_hdr_len..])?, None));
         }
 
         let (mut aux_hdr, aux_hdr_len) =
@@ -558,8 +535,12 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
                 }
             })
             .ok_or_else(|| {
-                log::warn!("[APS-DECRYPTION] couldn't decrypt frame, key not found. source \
-                    address: {:?}, key_pair_set: {:?}", source_address, self.device_key_pair_set);
+                log::warn!(
+                    "[APS-DECRYPTION] couldn't decrypt frame, key not found. source \
+                    address: {:?}, key_pair_set: {:?}",
+                    source_address,
+                    self.device_key_pair_set
+                );
                 SecurityError::Unspecified
             })?;
 
@@ -575,18 +556,22 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
                 HmacAes128Mmo::hmac(key_config.link_key.as_slice(), &[0x02])?
             }
             KeyIdentifier::Network => {
-                log::warn!("[APS-DECRYPTION] couldn't decrypt frame, invalid identifier in \
-                    aux header key identifier");
-                return Err(SecurityError::InvalidData)
-            },
+                log::warn!(
+                    "[APS-DECRYPTION] couldn't decrypt frame, invalid identifier in \
+                    aux header key identifier"
+                );
+                return Err(SecurityError::InvalidData);
+            }
         };
 
         // step 4
         if matches!(key_config.link_key_type, LinkKeyType::UniqueLinkKey)
             && aux_hdr.frame_counter < key_config.incoming_frame_counter
         {
-            log::warn!("[APS-DECRYPTION] couldn't decrypt frame, frame counter in aux header is \
-                    less than key incoming frame counter");
+            log::warn!(
+                "[APS-DECRYPTION] couldn't decrypt frame, frame counter in aux header is \
+                    less than key incoming frame counter"
+            );
             return Err(SecurityError::Unspecified);
         }
 
@@ -598,8 +583,10 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
 
         // TODO:verify the source address
         let Some(_source_address) = aux_hdr.source_address else {
-            log::warn!("[APS-DECRYPTION] couldn't decrypt frame, aux header does not contain the \
-                source address");
+            log::warn!(
+                "[APS-DECRYPTION] couldn't decrypt frame, aux header does not contain the \
+                source address"
+            );
             return Err(SecurityError::InvalidData);
         };
 
@@ -631,12 +618,15 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
             .find(|k| {
                 k.device_address == dest
                     && matches!(
-                    k.key_attributes,
-                    KeyAttribute::ProvisionalKey | KeyAttribute::VerifiedKey
-                )
+                        k.key_attributes,
+                        KeyAttribute::ProvisionalKey | KeyAttribute::VerifiedKey
+                    )
             })
             .ok_or_else(|| {
-                log::warn!("[APS-ENCRYPTION] couldn't encrypt frame, key not found. dest address: {:?}", dest);
+                log::warn!(
+                    "[APS-ENCRYPTION] couldn't encrypt frame, key not found. dest address: {:?}",
+                    dest
+                );
                 SecurityError::Unspecified
             })?;
         let link_key = key_config.link_key.as_slice();
@@ -644,17 +634,13 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
         // Step 1: Obtain security material and key identifier
         let (key, key_id) = match frame {
             ApsFrame::ApsCommand(ApsCommandFrame {
-                                     command: ApsCommand::TransportKey(ref tk),
-                                     ..
-                                 }) => match tk.key_descriptor {
-                StandardKeyDescriptor::StandardNetworkKey(_) => (
-                    HmacAes128Mmo::hmac(link_key, &[0x00])?,
-                    KeyIdentifier::KeyTransport,
-                ),
-                _ => (
-                    HmacAes128Mmo::hmac(link_key, &[0x02])?,
-                    KeyIdentifier::KeyLoad,
-                ),
+                command: ApsCommand::TransportKey(ref tk),
+                ..
+            }) => match tk.key_descriptor {
+                StandardKeyDescriptor::StandardNetworkKey(_) => {
+                    (HmacAes128Mmo::hmac(link_key, &[0x00])?, KeyIdentifier::KeyTransport)
+                }
+                _ => (HmacAes128Mmo::hmac(link_key, &[0x02])?, KeyIdentifier::KeyLoad),
             },
             _ => (key_config.link_key, KeyIdentifier::Data),
         };
@@ -678,13 +664,9 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
         let aux_hdr = AuxFrameHeader {
             security_control,
             frame_counter,
-            source_address: if security_control.extended_nonce {
-                Some(ieee_address)
-            } else {
-                None
-            },
+            source_address: if security_control.extended_nonce { Some(ieee_address) } else { None },
             key_sequence_number: None, /* this is should be never set because key_id = 0x01
-                                    * (NetworkKey) is invalid */
+                                        * (NetworkKey) is invalid */
         };
 
         // Write APS header
@@ -700,11 +682,10 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
             ApsFrame::ApsCommand(command_frame) => {
                 let mut bytes = [0u8; MAX_APS_PAYLOAD_SIZE];
                 let mut offset = 0;
-                bytes.write_with(&mut offset, command_frame.command, byte::LE)
-                    .map_err(|err| {
-                        log::warn!("[APS-ENCRYPTION] error writing command frame: {:?}", err);
-                        err
-                    })?;
+                bytes.write_with(&mut offset, command_frame.command, byte::LE).map_err(|err| {
+                    log::warn!("[APS-ENCRYPTION] error writing command frame: {:?}", err);
+                    err
+                })?;
 
                 write_and_encrypt_in_place(
                     security_level,
@@ -727,7 +708,6 @@ impl<T: JoinedNwk<D, S>, D: NwkMac, S: StorageRegion> Aps<T, D, S> {
     }
 }
 
-
 impl<D: NwkMac, S: StorageRegion> Aps<Nwk<JoinedAsRouter, D, S>, D, S> {
     pub fn handle_remove_device_command(
         &self,
@@ -736,24 +716,20 @@ impl<D: NwkMac, S: StorageRegion> Aps<Nwk<JoinedAsRouter, D, S>, D, S> {
     ) -> Option<ApsIndication> {
         Some(ApsIndication::RemoveDevice(ApsmeRemoveDeviceIndication {
             src_address: self.nwk.find_ext_addr(src_address)?,
-            target_address: cmd.target_address
+            target_address: cmd.target_address,
         }))
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::apl::aps::security::types::common::{DeviceKeyPairDescriptor, KeyAttribute, LinkKeyType};
+    use crate::apl::aps::security::types::common::{
+        DeviceKeyPairDescriptor, KeyAttribute, LinkKeyType,
+    };
     use crate::apl::aps::types::TxOptions;
     use crate::common::security::TRUST_CENTER_LINK_KEY;
     use crate::common::security::frame::SecurityLevel;
-
-    const NETWORK_KEY: [u8; 16] = [
-        0xab, 0xcd, 0xef, 0x01, 0x23, 0x45, 0x67, 0x89, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00,
-    ];
 
     #[test]
     fn test_create_nonce() {
@@ -771,9 +747,10 @@ mod tests {
             key_sequence_number: None,
         };
         let nonce = aux_hdr.create_nonce().unwrap();
-        assert_eq!(nonce, [
-            0xdd, 0xdd, 0xcc, 0xcc, 0xbb, 0xbb, 0xaa, 0xaa, 0x00, 0x00, 0x00, 0x00, 45
-        ]);
+        assert_eq!(
+            nonce,
+            [0xdd, 0xdd, 0xcc, 0xcc, 0xbb, 0xbb, 0xaa, 0xaa, 0x00, 0x00, 0x00, 0x00, 45]
+        );
     }
 
     #[test]
@@ -781,7 +758,8 @@ mod tests {
         // aps cmd request key
         let frame_buffer = [
             0x21, 0x66, // aps header
-            0x20, 0x4, 0x0, 0x0, 0x0, 0xe5, 0x1, 0x30, 0x38, 0x9c, 0x38, 0xc1, 0xa4, // aux header
+            0x20, 0x4, 0x0, 0x0, 0x0, 0xe5, 0x1, 0x30, 0x38, 0x9c, 0x38, 0xc1,
+            0xa4, // aux header
             0x1a, 0x31, // enc data
             0xa4, 0xd7, 0xf4, 0xd7, // mic
         ];
@@ -797,9 +775,7 @@ mod tests {
             link_key_type: LinkKeyType::GlobalLinkKey,
         };
 
-        let mut aps = Aps::end_device()
-            .key_pair_desc(key_desc)
-            .call();
+        let mut aps = Aps::end_device().key_pair_desc(key_desc).call();
 
         let (frame, _) = aps.decrypt_aps_frame(&mut buf).unwrap();
 
@@ -810,8 +786,8 @@ mod tests {
 
         let mut got_buffer = [0u8; 21];
 
-        let offset = aps.encrypt_aps_frame(frame, dest, TxOptions::default(), &mut got_buffer)
-            .unwrap();
+        let offset =
+            aps.encrypt_aps_frame(frame, dest, TxOptions::default(), &mut got_buffer).unwrap();
 
         assert_eq!(offset, frame_buffer.len());
         assert_eq!(frame_buffer, got_buffer);
@@ -838,9 +814,7 @@ mod tests {
             link_key_type: LinkKeyType::GlobalLinkKey,
         };
 
-        let mut aps = Aps::end_device()
-            .key_pair_desc(key_pair)
-            .call();
+        let mut aps = Aps::end_device().key_pair_desc(key_pair).call();
         let mut buf = frame_buffer;
 
         let (frame, _) = aps.decrypt_aps_frame(&mut buf).unwrap();
@@ -851,8 +825,8 @@ mod tests {
             .call();
 
         let mut got_buffer = [0u8; 54];
-        let offset = aps.encrypt_aps_frame(frame, dest, TxOptions::default(), &mut got_buffer)
-            .unwrap();
+        let offset =
+            aps.encrypt_aps_frame(frame, dest, TxOptions::default(), &mut got_buffer).unwrap();
 
         assert_eq!(offset, frame_buffer.len());
         assert_eq!(frame_buffer, got_buffer);
@@ -879,9 +853,7 @@ mod tests {
         };
         let mut buf = frame_buffer;
 
-        let mut aps = Aps::end_device()
-            .key_pair_desc(key_pair)
-            .call();
+        let mut aps = Aps::end_device().key_pair_desc(key_pair).call();
 
         let (frame, _) = aps.decrypt_aps_frame(&mut buf).unwrap();
 
@@ -891,8 +863,8 @@ mod tests {
             .call();
 
         let mut got_buffer = [0u8; 53];
-        let offset = aps.encrypt_aps_frame(frame, dest, TxOptions::default(), &mut got_buffer)
-            .unwrap();
+        let offset =
+            aps.encrypt_aps_frame(frame, dest, TxOptions::default(), &mut got_buffer).unwrap();
 
         assert_eq!(offset, frame_buffer.len());
         assert_eq!(frame_buffer, got_buffer);

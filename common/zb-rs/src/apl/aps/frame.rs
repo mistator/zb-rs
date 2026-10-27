@@ -25,7 +25,7 @@ pub struct ApsFrameControl {
     pub ack_format: bool,
     pub security: bool,
     pub ack_request: bool,
-    pub extended_header: bool
+    pub extended_header: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryRead, TryWrite)]
@@ -53,10 +53,7 @@ pub enum ExtendedFrameControlField {
 
 impl ExtendedFrameControlField {
     pub fn is_fragmented(&self) -> bool {
-        matches!(
-            self,
-            Self::FragmentationFirst { .. } | Self::FragmentationNotFirst { .. }
-        )
+        matches!(self, Self::FragmentationFirst { .. } | Self::FragmentationNotFirst { .. })
     }
 }
 

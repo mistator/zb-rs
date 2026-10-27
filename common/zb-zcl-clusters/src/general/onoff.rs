@@ -16,9 +16,12 @@ pub trait OnOffClusterHandler: Sized + Debug {
 #[zcl_attr(identifier = 0x0, access = AttributeAccess::READ_REPORT, reported = (0x0, 0xffff, None))]
 pub struct OnOff(bool);
 
-#[zcl_attr(identifier = 0x4000)] pub struct GlobalSceneControl(bool);
-#[zcl_attr(identifier = 0x4001, access = AttributeAccess::READ_WRITE)] pub struct OnTime(u16);
-#[zcl_attr(identifier = 0x4002, access = AttributeAccess::READ_WRITE)] pub struct OffWaitTime(u16);
+#[zcl_attr(identifier = 0x4000)]
+pub struct GlobalSceneControl(bool);
+#[zcl_attr(identifier = 0x4001, access = AttributeAccess::READ_WRITE)]
+pub struct OnTime(u16);
+#[zcl_attr(identifier = 0x4002, access = AttributeAccess::READ_WRITE)]
+pub struct OffWaitTime(u16);
 
 #[zcl_cluster(
     identifier = 0x0006,
@@ -27,7 +30,8 @@ pub struct OnOff(bool);
     update_handler = on_off_update_handler
 )]
 pub struct OnOffCluster<H: OnOffClusterHandler> {
-    #[R] pub onoff: OnOff,
+    #[R]
+    pub onoff: OnOff,
     pub global_scene_control: GlobalSceneControl,
     pub on_time: OnTime,
     pub off_wait_time: OffWaitTime,
@@ -35,9 +39,13 @@ pub struct OnOffCluster<H: OnOffClusterHandler> {
 }
 
 impl<H: OnOffClusterHandler> OnOffCluster<H> {
-    pub fn is_on(&self) -> bool { self.onoff.value }
+    pub fn is_on(&self) -> bool {
+        self.onoff.value
+    }
 
-    pub fn is_off(&self) -> bool { !self.is_on() }
+    pub fn is_off(&self) -> bool {
+        !self.is_on()
+    }
 
     pub fn on(&mut self) -> () {
         self.onoff.value = true;
@@ -139,9 +147,7 @@ impl TryRead<'_, u8> for OnOffZclCommand {
                 let (cmd, size) = OnWithTimedOffCmd::try_read(bytes, byte::LE)?;
                 Ok((OnOffZclCommand::OnWithTimedOff(cmd), size))
             }
-            _ => Err(byte::Error::BadInput {
-                err: "invalid command id for OnOff cluster",
-            }),
+            _ => Err(byte::Error::BadInput { err: "invalid command id for OnOff cluster" }),
         }
     }
 }

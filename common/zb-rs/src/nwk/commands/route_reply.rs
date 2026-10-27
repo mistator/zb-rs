@@ -6,6 +6,7 @@ use crate::nwk::commands::Command;
 use crate::nwk::commands::route_request::RouteRequest;
 use crate::nwk::constants::ROUTE_DISCOVERY_TIME;
 use crate::nwk::constants::WAIT_BEFORE_VALIDATION;
+use crate::nwk::ctx::{InitializedNwk, Nwk, RoutingState};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nib::RouteStatus;
@@ -20,7 +21,6 @@ use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::BitStruct;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::nwk::ctx::{InitializedNwk, Nwk, RoutingState};
 
 #[derive(BitStruct, Clone, Copy, Debug)]
 #[bit_struct(repr = u8)]
@@ -44,15 +44,13 @@ pub struct RouteReply {
     pub responder_ieee_address: Option<ExtendedAddress>,
 }
 
-impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S>  {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     pub async fn send_route_reply_cmd(
         &mut self,
         route_request: &ReceivedCommandFrame<'_, RouteRequest>,
         path_cost: u8,
     ) -> TransferResult {
-        let hdr = NwkHeader::cmd(self)
-            .destination(route_request.mac_src_addr)
-            .call();
+        let hdr = NwkHeader::cmd(self).destination(route_request.mac_src_addr).call();
 
         /*
         let responder_ext_addr = ctx
@@ -60,9 +58,9 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S>  {
             .find_ext_addr(route_request.cmd.destination_address);
             TODO
          */
-        let responder_ext_addr = self.lock_neighbors(|children|
-            children.find_by_short_addr(route_request.cmd.dst_addr)
-                .map(|nb| nb.ext_addr.unwrap()));
+        let responder_ext_addr = self.lock_neighbors(|children| {
+            children.find_by_short_addr(route_request.cmd.dst_addr).map(|nb| nb.ext_addr.unwrap())
+        });
 
         let cmd = Command::RouteReply(RouteReply {
             command_options: CommandOptions {
@@ -73,7 +71,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S>  {
             route_request_id: route_request.cmd.route_request_id,
             originator_address: route_request.originator_addr(),
             responder_address: route_request.cmd.dst_addr,
-            path_cost: path_cost + compute_routing_cost() as u8,
+            path_cost: path_cost + compute_routing_cost(route_request.lqi) as u8,
             originator_ieee_address: route_request.originator_ieee_addr(),
             responder_ieee_address: responder_ext_addr,
         });
@@ -150,16 +148,14 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S>  {
                 };
 
                 update_next_hop(route, discovery_key, frame);
-            } else if matches!(
-            route.status,
-            RouteStatus::Active | RouteStatus::ValidationUnderway
-        ) {
+            } else if matches!(route.status, RouteStatus::Active | RouteStatus::ValidationUnderway)
+            {
                 update_next_hop(route, discovery_key, frame);
             }
         } else {
             update_next_hop(route, discovery_key, frame);
         }
 
-        frame.cmd.path_cost += compute_routing_cost() as u8;
+        frame.cmd.path_cost += compute_routing_cost(frame.lqi) as u8;
     }
 }

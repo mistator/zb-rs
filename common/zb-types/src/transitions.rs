@@ -1,6 +1,6 @@
 use derive_more::Error;
 
-#[derive(Error)]
+#[derive(Error, Debug)]
 pub struct TransitionError<T, E> {
     pub state: T,
     pub error: E,
@@ -21,4 +21,20 @@ pub type TransitionResult<TOld, TNew, E> = Result<TNew, TransitionError<TOld, E>
 pub enum Either<A, B> {
     First(A),
     Second(B),
+}
+
+impl<A, B> Either<A, B> {
+    pub fn first(&self) -> Option<&A> {
+        match self {
+            Either::First(first) => Some(first),
+            Either::Second(_) => None,
+        }
+    }
+
+    pub fn second(&self) -> Option<&B> {
+        match self {
+            Either::First(_) => None,
+            Either::Second(second) => Some(second),
+        }
+    }
 }

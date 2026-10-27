@@ -1,5 +1,5 @@
+use byte::TryRead;
 use core::ops::Add;
-
 use embassy_time::Instant;
 use embassy_time::Timer;
 use embassy_time::{Duration, TimeoutError, WithTimeout};
@@ -8,29 +8,34 @@ use itertools::Itertools;
 use crate::common::information_base::RouteEntryKey;
 use crate::common::security::frame::SecurityLevel;
 use crate::mac::mlme::{AssociateResponseStatus, MlmeScanRequest, MlmeScanType};
-use crate::mac::types::{MacIndication, McpsDataIndication, MlmeAssociateIndication, PanDescriptor};
+use crate::mac::types::{
+    MacIndication, McpsDataIndication, MlmeAssociateIndication, PanDescriptor,
+};
 use crate::nwk::commands::Command;
+use crate::nwk::ctx::{
+    BaseNwkPrivate, InitializedNwk, InitializedState, JoinedAsEndDevice, Nwk, NwkListen,
+    PendingJoin, RoutingState,
+};
 use crate::nwk::frame::CommandFrame;
 use crate::nwk::frame::NwkDataFrame;
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::frame::header::{DiscoverRoute, MulticastMode};
-use crate::nwk::nib::{NeighborRelationship, NewNwkNeighbour, NwkNeighbor, RouteStatus};
 use crate::nwk::nib::TransactionRecord;
+use crate::nwk::nib::{NeighborRelationship, NewNwkNeighbour, NwkNeighbor, RouteStatus};
 use crate::nwk::nlde::JoinMethod::Association;
-use crate::nwk::nlde::{NldeDataIndication};
 use crate::nwk::nlde::NldeDataIndicationDstAddress;
 use crate::nwk::nlde::NlmeJoinIndication;
 use crate::nwk::nlde::NwkIndication;
-use crate::nwk::service::routing::ReceivedCommandFrame;
-use crate::unwrap_or_return;
-use zb_hal::{LocalIeee802154Driver, NwkMac, StorageRegion};
-use zb_types::common::{DeviceType, ExtendedAddress, PanId};
-use zb_types::common::NwkAddress;
-use zb_types::mac::MacAddress;
+use crate::nwk::nlde::{NldeDataIndication, NldeTransferError};
+use crate::nwk::nlme::{ScanDuration, ZigbeeBeacon};
+use crate::nwk::service::routing::{FrameRoutingResult, ReceivedCommandFrame};
+use crate::{return_if_some, unwrap_or_return};
+use zb_hal::{NwkMac, StorageRegion};
 use zb_types::Vec;
-use crate::nwk::ctx::{BaseNwkPrivate, InitializedNwk, InitializedState, JoinedAsEndDevice, NonRoutingState, Nwk, NwkListen, PendingJoin, RoutingState};
-use crate::nwk::nlme::ScanDuration;
+use zb_types::common::NwkAddress;
+use zb_types::common::{DeviceType, ExtendedAddress, PanId};
+use zb_types::mac::MacAddress;
 
 impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     pub(crate) async fn wait_for_frame<V>(
@@ -45,20 +50,17 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                 if let MacIndication::Data(mut indication) = indication {
                     match indication.dest_address {
                         None => continue,
-                        Some(_) => {
-                            match self.decrypt_frame(indication.payload.as_mut_slice())
-                            {
-                                Err(err) => {
-                                    log::warn!("error decrypting network frame: {:?}", err);
-                                    continue;
-                                }
-                                Ok((frame, _)) => {
-                                    if let Some(result) = eval(&frame) {
-                                        return result;
-                                    }
+                        Some(_) => match self.decrypt_frame(indication.payload.as_mut_slice()) {
+                            Err(err) => {
+                                log::warn!("error decrypting network frame: {:?}", err);
+                                continue;
+                            }
+                            Ok((frame, _)) => {
+                                if let Some(result) = eval(&frame) {
+                                    return result;
                                 }
                             }
-                        }
+                        },
                     }
                 }
             }
@@ -77,10 +79,9 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> NwkListen<D, S> for Nwk<T, D,
                     self.handle_data_indication(is_authorized, indication).await
                 }
                 MacIndication::BeaconNotify(pd) => self.handle_beacon_notify_indication(pd).await,
-                MacIndication::Associate(indication) => self
-                    .handle_associate_indication(indication)
-                    .await
-                    .map(NwkIndication::Join),
+                MacIndication::Associate(indication) => {
+                    self.handle_associate_indication(indication).await.map(NwkIndication::Join)
+                }
                 _ => None,
             };
 
@@ -136,24 +137,49 @@ impl<D: NwkMac, S: StorageRegion> NwkListen<D, S> for Nwk<JoinedAsEndDevice, D, 
 }
 
 impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
-    async fn handle_beacon_notify_indication(&mut self, pd: PanDescriptor) -> Option<NwkIndication> {
-        if pd.coord_pan_id == self.get_pan_id() && pd.zigbee_beacon.extended_pan_id != self.get_ext_pan_id() {
+    async fn handle_beacon_notify_indication(
+        &mut self,
+        pd: PanDescriptor,
+    ) -> Option<NwkIndication> {
+        let (zigbee_beacon, _) = ZigbeeBeacon::try_read(pd.payload.as_slice(), byte::LE).ok()?;
+
+        if pd.coord_pan_id == self.get_pan_id()
+            && zigbee_beacon.extended_pan_id != self.get_ext_pan_id()
+        {
             // PanId conflict detected
-            let pan_ids = self.mac.scan(MlmeScanRequest {
-                scan_type: MlmeScanType::Active,
-                channel_mask: self.mac.get_channel().as_channel_mask(),
-                duration: ScanDuration::default()
-            }).await
+            let pan_ids = self
+                .mac
+                .scan(MlmeScanRequest {
+                    scan_type: MlmeScanType::Active,
+                    channel_mask: self.mac.get_channel().as_channel_mask(),
+                    duration: ScanDuration::default(),
+                })
+                .await
                 .ok()?
                 .iter()
                 .take(16)
                 .map(|item| item.coord_pan_id)
                 .collect::<Vec<PanId, 16>>();
-            
-            self.send_nwk_report_cmd(pan_ids).await;
+
+            self.send_nwk_report_cmd(pan_ids).await.ok()?;
         }
 
         None
+    }
+}
+
+pub struct RelayFrameResult {
+    pub should_indicate: bool,
+    pub transmit_result: FrameRoutingResult,
+}
+
+impl RelayFrameResult {
+    pub fn discard() -> Self {
+        Self { should_indicate: false, transmit_result: None }
+    }
+
+    pub fn from_result(result: Result<(), NldeTransferError>) -> Self {
+        Self { should_indicate: false, transmit_result: Some(result) }
     }
 }
 
@@ -179,7 +205,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                 if let Some(child) = child {
                     child
                 } else {
-                    nbs.children.retain(|nb| nb.ext_addr != Some(indication.device_ext_addr));
+                    nbs.neighbors.retain(|nb| nb.ext_addr != Some(indication.device_ext_addr));
                     let nwk_addr = assigned_address;
                     let neighbor = NwkNeighbor::new(NewNwkNeighbour {
                         ext_addr: indication.device_ext_addr,
@@ -191,10 +217,8 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                             _ => NeighborRelationship::UnauthenticatedChild,
                         },
                     });
-                    match nbs.children.push(neighbor) {
-                        Ok(_) => nbs
-                            .find_by_ext_addr(indication.device_ext_addr)
-                            .unwrap(),
+                    match nbs.neighbors.push(neighbor) {
+                        Ok(_) => nbs.find_by_ext_addr(indication.device_ext_addr).unwrap(),
                         Err(_) => return None,
                     }
                 }
@@ -243,8 +267,8 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         is_authorized: bool,
         mut indication: McpsDataIndication,
     ) -> Option<NwkIndication> {
-        let (frame, use_security) = self
-            .process_incoming_indication(&mut indication, is_authorized)?;
+        let (frame, use_security) =
+            self.process_incoming_indication(&mut indication, is_authorized)?;
 
         if !self.handle_end_device_frame(&frame) {
             return None;
@@ -261,7 +285,6 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                 indication.src_address.unwrap(),
             );
         }
-
 
         match frame {
             NwkFrame::Data(mut dataframe) => {
@@ -288,7 +311,8 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     // shall be relayed according to the procedures outlined in
                     // section 3.6.3.3.2.
                     } else if hdr.destination.is_unicast() && hdr.destination != self.get_addr() {
-                        self.relay_unicast_frame(&mut dataframe).await
+                        self.relay_unicast_frame(&mut dataframe).await;
+                        true
                     } else {
                         true
                     }
@@ -297,8 +321,8 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                 return if should_indicate_frame && self.frame_matches_self(&dataframe) {
                     Some(self.return_data_indication(&dataframe, &indication, use_security))
                 } else {
-                    return None
-                }
+                    return None;
+                };
             }
             NwkFrame::NwkCommand(mut cmd_frame) => {
                 let mac_src_address =
@@ -312,6 +336,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                 match cmd_frame.command {
                     Command::RouteRequest(ref mut cmd) => {
                         self.handle_route_request_command(&mut ReceivedCommandFrame {
+                            lqi: indication.link_quality,
                             mac_src_addr: mac_src_address,
                             header,
                             cmd,
@@ -326,6 +351,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                         }
 
                         self.handle_route_reply_command(&mut ReceivedCommandFrame {
+                            lqi: indication.link_quality,
                             mac_src_addr: mac_src_address,
                             header,
                             cmd,
@@ -335,6 +361,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     Command::RejoinRequest(ref mut cmd) => {
                         match self
                             .handle_rejoin_request_command(&ReceivedCommandFrame {
+                                lqi: indication.link_quality,
                                 mac_src_addr: mac_src_address,
                                 header,
                                 cmd,
@@ -352,6 +379,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     }
                     Command::LinkStatus(ref mut cmd) => {
                         self.handle_link_status_command(&ReceivedCommandFrame {
+                            lqi: indication.link_quality,
                             mac_src_addr: mac_src_address,
                             header,
                             cmd,
@@ -359,6 +387,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     }
                     Command::EndDeviceTimeoutRequest(ref mut cmd) => {
                         self.handle_end_device_timeout_request_command(&ReceivedCommandFrame {
+                            lqi: indication.link_quality,
                             mac_src_addr: mac_src_address,
                             header,
                             cmd,
@@ -368,11 +397,15 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     }
                     Command::NetworkStatus(_) => {}
                     Command::Leave(ref mut cmd) => {
-                        return self.handle_leave_request(&ReceivedCommandFrame {
-                            mac_src_addr: mac_src_address,
-                            header,
-                            cmd,
-                        }).await.map(|leave| NwkIndication::Leave(leave));
+                        return self
+                            .handle_leave_request(&ReceivedCommandFrame {
+                                lqi: indication.link_quality,
+                                mac_src_addr: mac_src_address,
+                                header,
+                                cmd,
+                            })
+                            .await
+                            .map(|leave| NwkIndication::Leave(leave));
                     }
                     Command::RouteRecord(_) => {}
                     Command::RejoinResponse(_) => {}
@@ -381,10 +414,9 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     Command::LinkPowerDelta(_) => {}
                     _ => {}
                 }
-
             }
-            NwkFrame::Reserved(_) => {},
-            NwkFrame::InterPan(_) => {},
+            NwkFrame::Reserved(_) => {}
+            NwkFrame::InterPan(_) => {}
         }
 
         None
@@ -405,11 +437,12 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
             // Address matches the value of the Source Address field of the message, and the
             // device type is 0x02 (end device). If no entry is found then the
             // message shall be dropped and no further processing shall take place.
-            let has_child = self.lock_neighbors(|children|
-                children.find_by_short_addr_and_device_type(hdr.source, DeviceType::EndDevice)
-                    .is_some());
-            if has_child
-            {
+            let has_child = self.lock_neighbors(|children| {
+                children
+                    .find_by_short_addr_and_device_type(hdr.source, DeviceType::EndDevice)
+                    .is_some()
+            });
+            if has_child {
                 // 3. The routing device shall issue a Mgmt_Leave_Req command to the
                 //    sender with the Rejoin
                 // parameter set to 1 and the RemoveChildren parameter set to 0.
@@ -440,10 +473,12 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         // to step 6.
 
         let nb_idx = self.lock_neighbors(|nbs| {
-            nbs.children.iter().find_position(|nb| {
-                (*nb).nwk_addr == nwk_src_address && (*nb).device_type == DeviceType::EndDevice
-            }).map(|item| item.0)
-
+            nbs.neighbors
+                .iter()
+                .find_position(|nb| {
+                    (*nb).nwk_addr == nwk_src_address && (*nb).device_type == DeviceType::EndDevice
+                })
+                .map(|item| item.0)
         });
         let nb_idx = unwrap_or_return!(nb_idx);
 
@@ -460,7 +495,8 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         //    nwkBroadcastTransactionTable, if it
         // does then go to step 6. If the message is a unicast, continue processing.
         if nwk_src_address.is_broadcast() {
-            if self.get_broadcast_transaction_table()
+            if self
+                .get_broadcast_transaction_table()
                 .iter()
                 .find(|t| {
                     t.source_address == nwk_src_address
@@ -476,55 +512,125 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         //    on the network acting as
         // the end device’s router parent; delete the corresponding neighbor table
         // entry.
-        self.lock_neighbors_mut(|nbs| nbs.children.remove(nb_idx));
+        self.lock_neighbors_mut(|nbs| nbs.neighbors.remove(nb_idx));
         // 6. Continue to process the message.
     }
 
-    // 3.6.5
-    async fn relay_broadcast_frame(&mut self, frame: &NwkDataFrame) -> bool {
-        let src_addr = frame.header.source;
-        let radius = frame.header.radius;
+    // 3.6.3.3
+    async fn relay_unicast_frame(&mut self, frame: &NwkDataFrame) -> RelayFrameResult {
+        return_if_some!(
+            self.try_unicast_direct_relay(frame).await.map(RelayFrameResult::from_result)
+        );
 
-        // Processing of a broadcast with a NWK source of the local device shall only be
-        // done when the device has been powered up and operating on the network for
-        // nwkNetworkBroadcastDeliveryTime.
-        if src_addr == self.get_addr()
-            && Instant::now().duration_since(Instant::MIN)
-                < self.get_nwk_broadcast_delivery_time()
-        {
-            return false;
+        // A device that has routing capacity shall check its routing table for an entry
+        // corresponding to the routing destination of the frame.
+        if !self.get_route_table().is_full() {
+            return_if_some!(
+                self.try_unicast_route_table(frame).await.map(RelayFrameResult::from_result)
+            );
+            // TODO: If the device does not have a routing table entry for the routing destination and it is not originating the frame using
+            // source routing, it shall examine the discover route sub-field of the NWK header frame control field. If the discover
+            // route sub-field has a value of 0x01, the device shall initiate route discovery, as described in section 3.6.3.5.1
+            if frame.header.control.route_discovery == DiscoverRoute::Enable {
+            } else {
+                // If the discover route sub-field has a value of 0 and the NIB attribute nwkUseTreeRouting has a value of TRUE then the
+                // device shall route along the tree using hierarchical routing. If the discover route sub-field has a value of 0, the NIB
+                // attribute nwkUseTreeRouting has a value of FALSE, and there is no routing table corresponding to the routing des-
+                // tination of the frame, the frame shall be discarded and the NLDE shall issue the NLDE-DATA.confirm primitive
+                // with a status value of ROUTE_ERROR
+                return_if_some!(
+                    self.try_unicast_tree_routing(frame).await.map(RelayFrameResult::from_result)
+                );
+            }
+            //return_if_some!(self.relay_source_routing(frame).await);
+        } else {
+            return_if_some!(
+                self.try_unicast_tree_routing(frame).await.map(RelayFrameResult::from_result)
+            );
+            // If the frame is
+            // being relayed on behalf of another device, the NLME shall issue a
+            // network status command frame destined for the device that is
+            // the source of the frame with a status of 0x04, indicating a lack of
+            // routing capacity. TODO
+            // It shall also issue
+            // the NLME-NWK-STATUS.indication to the next higher layer with the
+            // NetworkAddr parameter equal to the 16-bit network address of
+            // the frame, and the Status parameter equal to 0x04, indicating a lack
+            // of routing capacity. TODO
         }
 
-        // When a device receives a broadcast frame from a neighboring device, it shall
-        // compare the destination address of the frame with its device type. If the
-        // destination address does not correspond to the device type of the receiver as
-        // out- lined in Table 3-69, the frame shall be discarded.
-        if !self.frame_matches_self(frame) {
-            return false;
-        }
-        // If the destination address corresponds to the device type of the
-        // receiver, the device shall compare the sequence number and the source address
-        // of the broadcast frame with the rec- ords in its BTT
-        if !self.check_and_update_broadcast_transaction_table(frame) {
-            return false;
-        }
+        self.relay_source_routing(frame).await
+    }
 
-        // If we are a router, retransmit frame after random jitter
-        if radius > 0 {
-            // TODO: fixme
-            // A ZigBee coordinator or ZigBee router operating in a non-beacon-enabled
-            // ZigBee network shall retransmit a previously broadcast frame at most
-            // nwkMaxBroadcastRetries times. If the device does not support passive
-            // acknowledgement, then it shall retransmit the frame exactly
-            // nwkMaxBroadcastRetries times.If the device supports passive acknowledgement
-            // and any of its neighboring devices have not relayed the broadcast frame
-            // within nwkPassiveAckTimeout OctetDurations then it shall continue to
-            // retransmit the frame on the MAC interfaces which are in communication
-            // with such neighbors up to a maximum of nwkMaxBroadcastRetries times.
-            self.transmit_broadcast_frame(frame).await;
-        }
+    // 3.6.3.3.2
+    async fn relay_source_routing(&mut self, frame: &NwkDataFrame) -> RelayFrameResult {
+        // Upon receipt of a source routed data frame from the MAC sub-layer as described in section 3.6.3.3, if the relay in-
+        // dex sub-field of the source route sub-frame has a value of 0, the device shall check the destination address field of
+        // the NWK header of the frame. If the destination address field of the NWK header of the frame is equal in value to
+        // the nwkNetworkAddress attribute of the NIB, then the frame shall be passed to the next higher layer using the
+        // NLDE-DATA.indication primitive.
+        if let Some(ref subframe) = frame.header.source_route_subframe {
+            // If the destination address field is not equal to the nwkNetworkAddress attribute
+            // of the NIB, and the receiving device is a ZigBee router or ZigBee coordinator, the device shall relay the frame di-
+            // rectly to the NWK header destination using the MCPS-DATA.request primitive, otherwise the frame shall be dis-
+            // carded silently.
+            if subframe.relay_index == 0 && frame.header.destination != self.get_addr() {
+                RelayFrameResult {
+                    should_indicate: false,
+                    transmit_result: Some(
+                        self.transmit_frame(&frame.as_frame(), frame.header.destination, true)
+                            .await,
+                    ),
+                }
+            } else if subframe.relay_index != 0 {
+                // If the relay index sub-field has a value other than 0, the device shall compare its network address with the address
+                // found at the relay index in the relay list.
+                // When relaying a source routed data frame, the NWK layer of a device shall also examine the routing table entry
+                // corresponding to the source address of the frame. If the no route cache field of the routing table entry has a value of
+                // FALSE, then the route record required field of the routing table entry shall be set to FALSE.
 
-        true
+                let addr = match subframe.relay_list.get(subframe.relay_index as usize) {
+                    None => return RelayFrameResult::discard(),
+                    Some(addr) => *addr,
+                };
+
+                if addr == self.get_addr() {
+                    // If the destination address of the frame is an
+                    // end device child of the relaying device, the frame shall be unicast using the MCPS-DATA.request primitive.
+                    if self.lock_neighbors(|nb| nb.find_by_short_addr(addr).is_some()) {
+                        RelayFrameResult {
+                            should_indicate: false,
+                            transmit_result: Some(
+                                self.transmit_frame(&frame.as_frame(), addr, true).await,
+                            ),
+                        }
+                    } else {
+                        // Otherwise the device shall decrement the relay index sub-field by 1, and relay the frame to the
+                        // address immediately prior to its own address in the relay list sub-field.
+
+                        let mut frame = frame.clone();
+                        frame.header.source_route_subframe.as_mut().unwrap().relay_index -= 1;
+                        let addr =
+                            *subframe.relay_list.get((subframe.relay_index - 1) as usize).unwrap();
+
+                        RelayFrameResult {
+                            should_indicate: false,
+                            transmit_result: Some(
+                                self.transmit_frame(&frame.as_frame(), addr, true).await,
+                            ),
+                        }
+                    }
+                } else {
+                    // If the addresses do not match, the frame shall be discarded and no further
+                    // action shall be taken.
+                    RelayFrameResult::discard()
+                }
+            } else {
+                RelayFrameResult::discard()
+            }
+        } else {
+            RelayFrameResult::discard()
+        }
     }
 
     // 3.6.6.3
@@ -556,8 +662,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
             // the TxOptions parameter to TRUE. All other flags of the
             // TxOptions parameter shall be set based on the network configuration.
             } else {
-                let key =
-                    RouteEntryKey::new(self.get_profile(), frame.header.destination, true);
+                let key = RouteEntryKey::new(self.get_profile(), frame.header.destination, true);
 
                 // If no matching
                 // nwkGroupIDTable entry is found, the device shall check its routing table for
@@ -565,12 +670,10 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                 // If there is no such routing table entry, the message shall be discarded.
                 let next_hop_addr = {
                     let route = unwrap_or_return!(
-                        self.get_route_table_mut()
-                            .get_mut(&key)
-                            .filter(|route| matches!(
-                                route.status,
-                                RouteStatus::Active | RouteStatus::ValidationUnderway
-                            )),
+                        self.get_route_table_mut().get_mut(&key).filter(|route| matches!(
+                            route.status,
+                            RouteStatus::Active | RouteStatus::ValidationUnderway
+                        )),
                         false
                     );
 
@@ -613,11 +716,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         // the Non- memberRadius sub-field shall be set to the value of the
         // MaxNonmemberRadius sub-field in the multicast control field, and the
         // message shall be transmitted as outlined in the following paragraph.
-        if self
-            .get_group_table()
-            .iter()
-            .contains(&frame.header.destination)
-        {
+        if self.get_group_table().iter().contains(&frame.header.destination) {
             mc.multicast_mode = MulticastMode::Member;
             mc.non_member_radius = mc.max_non_member_radius;
         // If a matching entry is not found, the NWK layer shall examine the frame's
@@ -678,198 +777,47 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
             .is_err()
     }
 
-    // 3.6.3.3
+    // 3.6.5
+    async fn relay_broadcast_frame(&mut self, frame: &NwkDataFrame) -> bool {
+        let src_addr = frame.header.source;
+        let radius = frame.header.radius;
 
-    // A device without routing capacity shall route along the tree using
-    // hierarchical routing provided that the value of the NIB attribute
-    // nwkUseTreeRouting is TRUE. If the value of the NIB attribute
-    // nwkUseTreeRouting is FALSE, the frame shall be discarded. If the frame is the
-    // result of an NLDE-DATA.request from the NHL of the current device,
-    // the NLDE shall issue the NLDE-DATA.confirm primitive with a status value of
-    // ROUTE_ERROR.
-    async fn relay_unicast_frame(&mut self, frame: &NwkDataFrame) -> bool {
-        if self.try_unicast_direct_relay(frame).await {
-            return true;
-        }
-
-        // A device that has routing capacity shall check its routing table for an entry
-        // corresponding to the routing destination of the frame.
-        if !self.get_route_table().is_full() {
-            if self.try_unicast_route_table(frame).await {
-                return true;
-            }
-
-            // If the device does not have a routing table entry for the routing destination
-            // and it is not originating the frame using source routing, it shall
-            // examine the discover route sub-field of the NWK header frame control field.
-            if frame.header.control.route_discovery == DiscoverRoute::Enable {
-                // If the discover
-                // route sub-field has a value of 0x01, the device shall initiate route
-                // discovery, as described in section 3.6.3.5.1. TODO
-                false
-            } else {
-                // If the discover route sub-field has a value of 0 and the NIB attribute
-                // nwkUseTreeRouting has a value of TRUE then the device shall route
-                // along the tree using hierarchical routing.
-                self.try_unicast_tree_routing(frame).await
-            }
-        } else {
-            self.try_unicast_tree_routing(frame).await
-            // If the frame is
-            // being relayed on behalf of another device, the NLME shall issue a
-            // network status command frame destined for the device that is
-            // the source of the frame with a status of 0x04, indicating a lack of
-            // routing capacity. TODO
-            // It shall also issue
-            // the NLME-NWK-STATUS.indication to the next higher layer with the
-            // NetworkAddr parameter equal to the 16-bit network address of
-            // the frame, and the Status parameter equal to 0x04, indicating a lack
-            // of routing capacity. TODO
-        }
-    }
-
-    pub(super) async fn try_unicast_direct_relay(&mut self, frame: &NwkDataFrame) -> bool {
-        let dst_addr = self.lock_neighbors(|nbs| nbs
-            .children
-            .iter()
-            .find(|nb| {
-                nb.nwk_addr == frame.header.destination
-                    && nb.device_type == DeviceType::EndDevice
-                    && nb.relationship == NeighborRelationship::Child
-            })
-            .map(|nb| nb.nwk_addr));
-
-        // If the receiving device is a ZigBee router or ZigBee coordinator, and the
-        // destination of the frame is a ZigBee end device and also the child of the
-        // receiving device, the frame shall be routed directly to the destination using
-        // the MCPS-DATA.request primitive, as described in section 3.6.2.1.
-        if let Some(dst_addr) = dst_addr {
-            // TODO: The frame shall also set the next hop destination address equal to the
-            // final destination address.
-            self.transmit_frame(&NwkFrame::Data(frame.clone()), dst_addr.into(), true).await.ok();
-            return true;
-        }
-
-        // Otherwise, for purposes of the ensuing discussion, define the routing
-        // address of a device to be its network address if it is a router or the
-        // coordinator or an end device and nwkAddrAlloc has a value of 0x02, or the
-        // network address of its parent if it is an end device and nwkAddrAlloc has a
-        // value of 0x00. Define the routing destination of a frame to be the
-        // routing address of the frame’s NWK destination. Note that dis-
-        // tributed address assignment makes it possible to derive the routing address
-        // of any device from its address. See sec- tion 3.6.1.6 for details.
-        let routing_dst_addr = self.get_routing_address_for_address(frame.header.destination);
-
-        // A ZigBee router or ZigBee coordinator may check the neighbor table for an
-        // entry corresponding to the routing des- tination of the frame. If there
-        // is such an entry, the device may route the frame directly to the destination
-        // using the MCPS-DATA.request primitive as described in section 3.6.2.1.
-        if self.lock_neighbors(|nbs| nbs.children.iter().find(|nb| nb.nwk_addr == routing_dst_addr).is_some())
+        // Processing of a broadcast with a NWK source of the local device shall only be
+        // done when the device has been powered up and operating on the network for
+        // nwkNetworkBroadcastDeliveryTime.
+        if src_addr == self.get_addr()
+            && Instant::now().duration_since(Instant::MIN) < self.get_nwk_broadcast_delivery_time()
         {
-            self.transmit_frame(&NwkFrame::Data(frame.clone()), routing_dst_addr.into(), true).await.ok();
-            return true;
+            return false;
         }
 
-        false
-    }
-
-    pub(super) async fn try_unicast_tree_routing(&mut self, frame: &NwkDataFrame) -> bool {
-        if self.get_profile().nwk_use_tree_routing {
-            // For hierarchical routing, if the destination is a descendant of the device,
-            // the device shall route the frame to the ap- propriate child. If the
-            // destination is a child, and it is also an end device, delivery of the frame
-            // can fail due to the macRxOnWhenIdle state of the child device. If the
-            // child has macRxOnWhenIdle set to FALSE, indirect transmission
-            // as described in IEEE 802.15.4-2015 [B1] may be used to deliver the frame. If
-            // the destination is not a descendant, the device shall route the frame
-            // to its parent. Every other device in the network is a descendant of
-            // the ZigBee coordinator and no device in the network is the de-
-            // scendant of any ZigBee end device. For a ZigBee router with address A at
-            // depth d, if the following logical expres- sion is true, then a
-            // destination device with address D is a descendant: A < D < A +
-            // Cskip(d – 1) For a definition of Cskip(d), see section 3.6.1.6.
-            // If it is determined that the destination is a descendant of the receiving
-            // device, the address N of the next hop device is given by:
-            // N = D
-            // for ZigBee end devices, where D > A + Rm x Cskip(d), and otherwise:
-            // If the NWK layer on a ZigBee router or ZigBee coordinator fails to deliver a
-            // unicast or multicast frame for any rea- son, the router or
-            // coordinator shall make its best effort to report the failure. No failure
-            // should be reported as the re- sult of a failure to deliver a
-            // NLME-NWK-STATUS. The failure reporting may take one of two forms. If the
-            // failed frame was being relayed as a result of a request from the next
-            // higher layer, then the NWK layer shall issue an NLDE-DATA.confirm
-            // with the error to the next higher layer. The value of the NetworkAddr
-            // parameter of the prim- itive shall be the intended destination of the
-            // frame. If the frame was being relayed on behalf of another device, then
-            // the relaying device shall send a network status command frame back to the
-            // source of the frame. The destination ad- dress field of the network
-            // status command frame shall be taken from the destination address field of the
-            // failed data frame.
-            // In either case, the reasons for failure that may be reported appear in Table
-            // 3-51.
-            let next_hop = self.tree_routing_next_hop(frame.header.destination);
-            self.transmit_frame(&NwkFrame::Data(frame.clone()), next_hop, true).await.ok();
-            return true;
+        // When a device receives a broadcast frame from a neighboring device, it shall
+        // compare the destination address of the frame with its device type. If the
+        // destination address does not correspond to the device type of the receiver as
+        // out- lined in Table 3-69, the frame shall be discarded.
+        if !self.frame_matches_self(frame) {
+            return false;
+        }
+        // If the destination address corresponds to the device type of the
+        // receiver, the device shall compare the sequence number and the source address
+        // of the broadcast frame with the rec- ords in its BTT
+        if !self.check_and_update_broadcast_transaction_table(frame) {
+            return false;
         }
 
-        // If the value of the NIB attribute nwkUseTreeRouting is FALSE, the
-        // frame shall be discarded
-        return false;
-    }
-
-    pub(super) async fn try_unicast_route_table(&mut self, frame: &NwkDataFrame) -> bool {
-        let slf_addr = self.get_addr();
-        let key = RouteEntryKey::new(self.get_profile(), frame.header.destination, false);
-        let route = unwrap_or_return!(self.get_route_table_mut().get_mut(&key), false);
-
-        // If there is such an entry, and if the value of the route status field for
-        // that entry is ACTIVE or VALI- DATION_UNDERWAY, the device shall relay the
-        // frame using the MCPS-DATA.request primitive and set the route status
-        // field of that entry to ACTIVE if it does not already have that value.
-        if matches!(
-            route.status,
-            RouteStatus::Active | RouteStatus::ValidationUnderway
-        ) {
-            let next_hop = route.next_hop_addr;
-            route.status = RouteStatus::Active;
-            self.transmit_frame(&NwkFrame::Data(frame.clone()), next_hop.into(), true).await.ok();
-
-            // If the many-to-one field of the
-            // routing table entry is set to TRUE, the NWK shall follow the
-            // procedure outlined in section 3.6.3.5.4 to determine
-            // whether a route record command frame must be sent.
-            // TODO
-        } else if route.status == RouteStatus::DiscoveryUnderway {
-            // If the device has a routing table entry corresponding to the routing
-            // destination of the frame but the value of the route status field for
-            // that entry is DISCOVERY_UNDERWAY, the device shall determine if it initiated
-            // the discovery by consulting its discovery table.
-            if route
-                .discovery
-                .get(&(frame.header.sequence_number, slf_addr))
-                .is_none()
-            {
-                // otherwise, the device shall initiate route discovery as described
-                // in section 3.6.3.5.1. TODO
-            } else {
-                // If the device initiated the discovery, the frame shall be treated
-                // as though route discov- ery has been initiated for
-                // this frame, The frame may optionally be buffered
-                // pending route discovery or routed along the tree using
-                // hierarchical routing, provided that the NIB attribute
-                // nwkUseTreeRouting has a value of TRUE. If the frame is routed
-                // along the tree, the discover route sub-field of the
-                // NWK header frame control field shall be set to 0x00.
-                // TODO
-            }
-        } else {
-            // If the device has a routing table entry corresponding to the routing
-            // destination of the frame but the route status field for that entry
-            // has a value of DISCOVERY_FAILED or INACTIVE, the device may route the frame
-            // along the tree using hierarchical routing, provided that the NIB
-            // attribute nwkUseTreeRouting has a value of TRUE
-            return self.try_unicast_tree_routing(frame).await;
+        // If we are a router, retransmit frame after random jitter
+        if radius > 0 {
+            // TODO: fixme
+            // A ZigBee coordinator or ZigBee router operating in a non-beacon-enabled
+            // ZigBee network shall retransmit a previously broadcast frame at most
+            // nwkMaxBroadcastRetries times. If the device does not support passive
+            // acknowledgement, then it shall retransmit the frame exactly
+            // nwkMaxBroadcastRetries times.If the device supports passive acknowledgement
+            // and any of its neighboring devices have not relayed the broadcast frame
+            // within nwkPassiveAckTimeout OctetDurations then it shall continue to
+            // retransmit the frame on the MAC interfaces which are in communication
+            // with such neighbors up to a maximum of nwkMaxBroadcastRetries times.
+            self.transmit_broadcast_frame(frame).await;
         }
 
         true
@@ -891,7 +839,8 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         indication: &mut McpsDataIndication,
         is_authorized: bool,
     ) -> Option<(NwkFrame, bool)> {
-        let (mut frame, use_security) = self.decrypt_frame(indication.payload.as_mut_slice()).ok()?;
+        let (mut frame, use_security) =
+            self.decrypt_frame(indication.payload.as_mut_slice()).ok()?;
 
         // On receipt of each frame, the radius field of the NWK header shall be
         // decremented by 1.
@@ -906,10 +855,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         }
 
         if !self.frame_passes_security_check(is_authorized, &frame) {
-            log::warn!(
-                "discarding NWK frame: security check not passed: {:?}",
-                frame
-            );
+            log::warn!("discarding NWK frame: security check not passed: {:?}", frame);
             return None;
         }
 
@@ -945,10 +891,8 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
             return false;
         }
 
-        if let NwkFrame::NwkCommand(CommandFrame {
-            command: Command::RejoinRequest(_),
-            header,
-        }) = frame
+        if let NwkFrame::NwkCommand(CommandFrame { command: Command::RejoinRequest(_), header }) =
+            frame
         {
             return header.destination == self.get_addr();
         };
@@ -961,8 +905,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     true
                 }
                 NwkFrame::NwkCommand(CommandFrame {
-                    command: Command::RejoinResponse(_),
-                    ..
+                    command: Command::RejoinResponse(_), ..
                 }) => true,
                 _ => false,
             }
@@ -1024,34 +967,41 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     // The following data frames shall be passed to the next higher layer using the
     // NLDE-DATA.indication primitive:
     fn frame_matches_self(&self, frame: &NwkDataFrame) -> bool {
-        self.frame_matches_self_end_device(frame) || match frame.header.destination {
-            NwkAddress::BROADCAST_RX_ON_IDLE => self.get_mac().is_rx_on_when_idle(),
-            NwkAddress::BROADCAST_ROUTERS => true,
-            NwkAddress::BROADCAST_LOW_POWER => false, // TODO?
-            _ => false
-        }
+        self.frame_matches_self_end_device(frame)
+            || match frame.header.destination {
+                NwkAddress::BROADCAST_RX_ON_IDLE => self.get_mac().is_rx_on_when_idle(),
+                NwkAddress::BROADCAST_ROUTERS => true,
+                NwkAddress::BROADCAST_LOW_POWER => false, // TODO?
+                _ => false,
+            }
     }
 }
 
 impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
-    async fn handle_end_device_commands(&mut self, mac_src_addr: NwkAddress, header: NwkHeader, mut cmd: Command) -> Option<NwkIndication> {
+    async fn handle_end_device_commands(
+        &mut self,
+        mac_src_addr: NwkAddress,
+        lqi: u8,
+        header: NwkHeader,
+        mut cmd: Command,
+    ) -> Option<NwkIndication> {
         match cmd {
             Command::EndDeviceTimeoutResponse(ref mut cmd) => {
                 self.handle_end_device_timeout_response_command(&ReceivedCommandFrame {
+                    lqi,
                     mac_src_addr,
                     header,
                     cmd,
                 })
-                    .await;
+                .await;
             }
             Command::Leave(ref mut cmd) => {
-                return self.handle_leave_request(&ReceivedCommandFrame {
-                    mac_src_addr,
-                    header,
-                    cmd,
-                }).await.map(|leave| NwkIndication::Leave(leave));
+                return self
+                    .handle_leave_request(&ReceivedCommandFrame { lqi, mac_src_addr, header, cmd })
+                    .await
+                    .map(|leave| NwkIndication::Leave(leave));
             }
-            _ => {},
+            _ => {}
         }
 
         None
@@ -1062,7 +1012,8 @@ impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
         is_authorized: bool,
         mut indication: McpsDataIndication,
     ) -> Option<NwkIndication> {
-        let (frame, security_use) = self.process_incoming_indication(&mut indication, is_authorized)?;
+        let (frame, security_use) =
+            self.process_incoming_indication(&mut indication, is_authorized)?;
 
         match frame {
             NwkFrame::Data(ref dataframe) => {
@@ -1075,16 +1026,21 @@ impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
             NwkFrame::NwkCommand(cmd_frame) => {
                 let header = cmd_frame.header;
 
-                let mac_src_addr =
-                    if let Some(MacAddress::Short(_, addr)) = indication.src_address {
-                        addr
-                    } else {
-                        return None
-                    };
+                let mac_src_addr = if let Some(MacAddress::Short(_, addr)) = indication.src_address
+                {
+                    addr
+                } else {
+                    return None;
+                };
 
-
-                self.handle_end_device_commands(mac_src_addr, header, cmd_frame.command).await
-            },
+                self.handle_end_device_commands(
+                    mac_src_addr,
+                    indication.link_quality,
+                    header,
+                    cmd_frame.command,
+                )
+                .await
+            }
             NwkFrame::Reserved(_) => None,
             NwkFrame::InterPan(_) => None,
         }
@@ -1097,7 +1053,8 @@ impl<D: NwkMac, S: StorageRegion> Nwk<PendingJoin, D, S> {
         is_authorized: bool,
         mut indication: McpsDataIndication,
     ) -> Option<NwkIndication> {
-        let (frame, security_use) = self.process_incoming_indication(&mut indication, is_authorized)?;
+        let (frame, security_use) =
+            self.process_incoming_indication(&mut indication, is_authorized)?;
 
         match frame {
             NwkFrame::Data(ref dataframe) => {
@@ -1116,32 +1073,32 @@ impl<D: NwkMac, S: StorageRegion> Nwk<PendingJoin, D, S> {
 
 #[cfg(test)]
 mod tests {
-    use embassy_futures::select::{select, Either};
-    use embassy_time::{Duration, Timer};
+    use crate::nwk::ctx::{JoinedAsEndDevice, Nwk, NwkListen};
     use crate::nwk::frame::NwkFrame;
     use crate::nwk::frame::header::{FrameType, NwkHeader};
     use crate::nwk::nlde::{NldeDataIndicationDstAddress, NwkIndication};
-    use zb_hal_test_mock::driver::{MockDriver, DEFAULT_NWK_ADDR};
+    use embassy_futures::select::{Either, select};
+    use embassy_time::{Duration, Timer};
+    use zb_hal_test_mock::driver::{DEFAULT_NWK_ADDR, MockDriver};
     use zb_hal_test_mock::storage::MemoryStorage;
     use zb_types::Vec;
     use zb_types::common::NwkAddress;
-    use crate::nwk::ctx::{JoinedAsEndDevice, Nwk, NwkListen};
 
-    const PAYLOAD: [u8; 17] = [
-        0x0, 0x1, 0x4, 0xb, 0x4, 0x1, 0x1, 0x56, 0x10, 0xae, 0x0, 0x5, 0x5, 0x8, 0x5, 0xb, 0x5
-    ];
+    const PAYLOAD: [u8; 17] =
+        [0x0, 0x1, 0x4, 0xb, 0x4, 0x1, 0x1, 0x56, 0x10, 0xae, 0x0, 0x5, 0x5, 0x8, 0x5, 0xb, 0x5];
 
-    async fn quick_indication_ed(nwk: &mut Nwk<JoinedAsEndDevice, MockDriver, MemoryStorage>, header: NwkHeader) -> Option<NwkIndication> {
+    async fn quick_indication_ed(
+        nwk: &mut Nwk<JoinedAsEndDevice, MockDriver, MemoryStorage>,
+        header: NwkHeader,
+    ) -> Option<NwkIndication> {
         let frame = NwkFrame::new_data_frame(header, Vec::from_iter(PAYLOAD));
         nwk.add_received_frame(&frame);
 
-        let result = match select(
-            nwk.listen_nwk(true),
-            Timer::after(Duration::from_millis(100)),
-        ).await {
-            Either::First(result) => Some(result),
-            Either::Second(_) => None
-        };
+        let result =
+            match select(nwk.listen_nwk(true), Timer::after(Duration::from_millis(100))).await {
+                Either::First(result) => Some(result),
+                Either::Second(_) => None,
+            };
 
         result
     }
@@ -1164,11 +1121,16 @@ mod tests {
         assert!(matches!(indication, NwkIndication::Data(_)));
         let indication = if let NwkIndication::Data(indication) = indication {
             indication
-        } else { unreachable!() };
+        } else {
+            unreachable!()
+        };
 
         assert_eq!(indication.src_address, NwkAddress(0));
         assert_eq!(indication.security_use, true);
-        assert_eq!(indication.dst_address, NldeDataIndicationDstAddress::UnicastOrBroadcast(DEFAULT_NWK_ADDR));
+        assert_eq!(
+            indication.dst_address,
+            NldeDataIndicationDstAddress::UnicastOrBroadcast(DEFAULT_NWK_ADDR)
+        );
         assert_eq!(indication.nsdu[0..17], PAYLOAD);
     }
 

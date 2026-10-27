@@ -1,7 +1,7 @@
 use byte::{BytesExt, TryRead, TryWrite, ctx};
 use byte_derive::{TryRead, TryWrite};
 use core::cmp::min;
-use zb_macros::{try_write_impl, BitStruct};
+use zb_macros::{BitStruct, try_write_impl};
 use zb_types::common::DeviceType;
 use zb_types::mac::MacCapabilities;
 
@@ -21,11 +21,17 @@ pub struct NodeDescriptor {
 }
 
 impl NodeDescriptor {
-    pub fn get_logical_type(&self) -> DeviceType { self.info.logical_type }
+    pub fn get_logical_type(&self) -> DeviceType {
+        self.info.logical_type
+    }
 
-    pub fn is_complex_descriptor_available(&self) -> bool { self.info.complex_descriptor_available }
+    pub fn is_complex_descriptor_available(&self) -> bool {
+        self.info.complex_descriptor_available
+    }
 
-    pub fn is_user_descriptor_available(&self) -> bool { self.info.user_descriptor_available }
+    pub fn is_user_descriptor_available(&self) -> bool {
+        self.info.user_descriptor_available
+    }
 }
 
 #[derive(BitStruct, Debug, Eq, PartialEq, Clone, Copy)]
@@ -36,17 +42,12 @@ pub struct FrequencyBands {
     #[bit_struct(skip = 1)]
     mid: bool,
     high: bool,
-    european_fsk: bool
+    european_fsk: bool,
 }
 
 impl Default for FrequencyBands {
     fn default() -> Self {
-        Self {
-            low: false,
-            mid: false,
-            high: true,
-            european_fsk: false,
-        }
+        Self { low: false, mid: false, high: true, european_fsk: false }
     }
 }
 
@@ -86,7 +87,7 @@ pub struct ServerMask {
     pub network_manager: bool,
     #[bit_struct(len = 7)]
     #[bit_struct(skip = 2)]
-    pub stack_compliance_revision: u8
+    pub stack_compliance_revision: u8,
 }
 
 #[derive(BitStruct, Copy, Clone, Debug, Default)]
@@ -156,8 +157,10 @@ pub struct SimpleDescriptor {
     pub application_profile_identifier: u16,
     pub application_device_identifier: u16,
     pub application_device_version: u8,
-    #[byte(len = u8)] pub application_input_cluster_list: zb_types::Vec<u16, 32>,
-    #[byte(len = u8)] pub application_output_cluster_list: zb_types::Vec<u16, 32>,
+    #[byte(len = u8)]
+    pub application_input_cluster_list: zb_types::Vec<u16, 32>,
+    #[byte(len = u8)]
+    pub application_output_cluster_list: zb_types::Vec<u16, 32>,
 }
 
 const USER_DESCRIPTOR_SIZE: usize = 16;
@@ -168,10 +171,8 @@ pub struct UserDescriptor([u8; 16]);
 impl<'a> TryRead<'a, ctx::Endian> for UserDescriptor {
     fn try_read(bytes: &'a [u8], _: ctx::Endian) -> byte::Result<(Self, usize)> {
         let offset = &mut 0;
-        let value: &'a [u8] = bytes.read_with(
-            offset,
-            ctx::Bytes::Len(min(bytes.len(), USER_DESCRIPTOR_SIZE)),
-        )?;
+        let value: &'a [u8] =
+            bytes.read_with(offset, ctx::Bytes::Len(min(bytes.len(), USER_DESCRIPTOR_SIZE)))?;
         if value.iter().all(|&b| b > 0x1f && b < 0x80) {
             let mut dest = [0x20u8; 16];
             let dest_slice = &mut dest[..value.len()];
@@ -179,9 +180,7 @@ impl<'a> TryRead<'a, ctx::Endian> for UserDescriptor {
 
             Ok((UserDescriptor(dest), *offset))
         } else {
-            Err(byte::Error::BadInput {
-                err: "InvalidUserDescriptor: Input is not valid ASCII",
-            })
+            Err(byte::Error::BadInput { err: "InvalidUserDescriptor: Input is not valid ASCII" })
         }
     }
 }

@@ -90,25 +90,27 @@ pub trait BaseApplication {
     fn get_clusters_mut(&mut self) -> zb_types::Vec<&mut dyn ZclCluster, MAX_CLUSTERS_PER_APP>;
 
     fn get_cluster_by_id(&self, cluster_id: u16) -> Option<&dyn ZclCluster> {
-        self.get_clusters()
-            .into_iter()
-            .find(|item| item.get_identifier() == cluster_id)
+        self.get_clusters().into_iter().find(|item| item.get_identifier() == cluster_id)
     }
 
     fn get_cluster_by_id_mut(&mut self, cluster_id: u16) -> Option<&mut dyn ZclCluster> {
-        self.get_clusters_mut()
-            .into_iter()
-            .find(|item| item.get_identifier() == cluster_id)
+        self.get_clusters_mut().into_iter().find(|item| item.get_identifier() == cluster_id)
     }
 
-    fn get_profile(&self) -> u16 { self.get_device().get_profile_and_device_ids().0 }
+    fn get_profile(&self) -> u16 {
+        self.get_device().get_profile_and_device_ids().0
+    }
 
-    fn get_update_interval(&self) -> u8 { 1 }
+    fn get_update_interval(&self) -> u8 {
+        1
+    }
 
     fn load(&mut self, bytes: &[u8]) -> byte::Result<()>;
     fn try_write(&self, bytes: &mut [u8]) -> byte::Result<usize>;
 
-    fn update_frequency(&self) -> u8 { 1 }
+    fn update_frequency(&self) -> u8 {
+        1
+    }
     fn update(&mut self, counter: u64) -> ();
 }
 

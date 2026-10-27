@@ -26,6 +26,8 @@ pub enum NldeTransferError {
     SecurityError(#[from] SecurityError),
     #[error("mcps data error: {}", 0)]
     McpsDataError(#[from] McpsDataError),
+    #[error("route discovery failed")]
+    RouteDiscoveryFailed,
     #[error("parse error")]
     ParseError(byte::Error),
 }
@@ -88,7 +90,7 @@ pub struct NlmeJoinIndication {
 pub enum NlmeLeaveIndication {
     LeaveSelf { rejoin: bool },
     LeaveChild { rejoin: bool, addr: NwkAddress },
-    LeaveParent { rejoin: bool }
+    LeaveParent { rejoin: bool },
 }
 
 type NlmeNetworkStatusIndication = NetworkStatus;

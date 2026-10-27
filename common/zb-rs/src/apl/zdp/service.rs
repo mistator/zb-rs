@@ -10,9 +10,10 @@ use crate::apl::aps::apsde::ApsdeSapConfirm;
 use crate::apl::aps::apsme::{ApsmeBindError, ApsmeUnbindError, BindStatus, Binding, UnbindStatus};
 use crate::apl::aps::constants::PARENT_ANNOUNCE_BASE_TIMER_SECONDS;
 use crate::apl::aps::constants::PARENT_ANNOUNCE_JITTER_MAX_SECONDS;
+use crate::apl::aps::ctx::{ApsListen, ApsTransmit, Apsme};
 use crate::apl::aps::types::{ApsEndpoint, ApsIndication};
-use crate::apl::zb_application::{ZbApplication};
-use crate::apl::zdo::{EndDeviceNodeCtx, ZbNode, ZbNodeJoinedStatus};
+use crate::apl::zb_application::ZbApplication;
+use crate::apl::zdo::{ZbNode, ZbNodeJoinedStatus};
 use crate::apl::zdp::ZDP_ENDPOINT;
 use crate::apl::zdp::ZDP_PROFILE;
 use crate::apl::zdp::types::TransactionData;
@@ -45,14 +46,13 @@ use crate::apl::zdp::types::discovery::SystemServerDiscoveryRsp;
 use crate::apl::zdp::types::network::MgmtPermitJoiningReq;
 use crate::apl::zdp::types::network::MgmtPermitJoiningRsp;
 use crate::common::bytes::WithLength;
+use crate::nwk::ctx::{BaseNwk, BaseNwkPrivate, InitializedNwk, JoinedNwk};
+use crate::nwk::nib::NwkNeighbor;
 use crate::zcl::cluster::types::ClusterType;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::DeviceType;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::apl::aps::ctx::{ApsListen, ApsTransmit, Apsme};
-use crate::nwk::ctx::{BaseNwk, BaseNwkPrivate, InitializedNwk, JoinedNwk, JoinedState, Nwk};
-use crate::nwk::nib::NwkNeighbor;
 
 pub type ApsdeResult = Result<ApsdeSapConfirm, ApsdeError>;
 pub type OptionalApsdeResult = Result<Option<ApsdeSapConfirm>, ApsdeError>;
@@ -71,7 +71,10 @@ enum StatusResult {
     DeviceNotFound,
 }
 
-async fn get_descriptor_for_endpoint(endpoint: ApsEndpoint, value: &ZbApplication) -> SimpleDescriptor {
+async fn get_descriptor_for_endpoint(
+    endpoint: ApsEndpoint,
+    value: &ZbApplication,
+) -> SimpleDescriptor {
     let value = value.lock().await;
     let (profile_id, device_id) = value.get_device().get_profile_and_device_ids();
     let input_clusters = value
@@ -98,33 +101,25 @@ async fn get_descriptor_for_endpoint(endpoint: ApsEndpoint, value: &ZbApplicatio
 }
 
 impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
-    fn get_status_and_neighbours(
-        &mut self,
-        addr: NwkAddress,
-    ) -> StatusResult {
+    fn get_status_and_neighbours(&mut self, addr: NwkAddress) -> StatusResult {
         if addr == self.ctx.get_nwk().get_addr() {
             return StatusResult::ThisDevice(addr);
         }
 
         self.ctx.get_nwk().lock_neighbors(|nbs| {
-            match nbs.children.iter().find(|item| item.nwk_addr == addr) {
+            match nbs.neighbors.iter().find(|item| item.nwk_addr == addr) {
                 Some(neighbour) => StatusResult::Neighbour(neighbour.clone()),
                 None => StatusResult::DeviceNotFound,
             }
         })
     }
 
-    fn handle_extended_addr_request(
-        &mut self,
-        start_index: u8,
-        rsp: &mut AddrRsp,
-    ) -> () {
+    fn handle_extended_addr_request(&mut self, start_index: u8, rsp: &mut AddrRsp) -> () {
         let addr = self.ctx.get_nwk().get_addr();
         let ext_addr = self.ctx.get_nwk().get_ext_addr();
 
         let matches = self.ctx.get_nwk().lock_neighbors(|nbs| {
-            nbs
-                .children
+            nbs.neighbors
                 .iter()
                 .filter(|item| item.device_type == DeviceType::EndDevice)
                 .skip(start_index as usize)
@@ -149,21 +144,19 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         let cluster_id = transaction_data.discriminant();
         let sequence_number = sequence_number.unwrap_or(self.ctx.get_zcl_transaction_number());
 
-        let cmd = ZdpCommand {
-            transaction_sequence_number: sequence_number,
-            transaction_data,
-        };
+        let cmd = ZdpCommand { transaction_sequence_number: sequence_number, transaction_data };
 
-        self.ctx.get_aps_mut().aps_data_request(
-            ApsdeRequest {
+        self.ctx
+            .get_aps_mut()
+            .aps_data_request(ApsdeRequest {
                 dst_address: dst,
                 profile_id: ZDP_PROFILE,
                 cluster_id,
                 src_endpoint: ZDP_ENDPOINT,
                 asdu: cmd,
                 ..Default::default()
-            },
-        ).await
+            })
+            .await
     }
 
     pub(crate) async fn handle_zdp_command(
@@ -172,7 +165,10 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
     ) -> OptionalApsdeResult {
         let (cmd, _) = ZdpCommand::try_read(indication.asdu.as_slice(), indication.cluster_id)
             .map_err(|err| {
-                log::warn!("[HANDLE-ZDP-CMD] couldn't parse zdp command for indication: {:?}", indication);
+                log::warn!(
+                    "[HANDLE-ZDP-CMD] couldn't parse zdp command for indication: {:?}",
+                    indication
+                );
                 ApsdeError::ByteError(err)
             })?;
 
@@ -199,23 +195,23 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             TransactionData::MatchDescReq(req) => {
                 self.handle_match_desc_request(&req, indication, seq).await
             }
-            TransactionData::DeviceAnnce(req) => {
-                self.handle_device_annce(&req, indication)
+            TransactionData::DeviceAnnce(req) => self.handle_device_annce(&req, indication),
+            TransactionData::ParentAnnce(req) => {
+                self.handle_parent_annce(&req, indication, seq).await
             }
-            TransactionData::ParentAnnce(req) => self.handle_parent_annce(&req, indication, seq).await,
             TransactionData::SystemServerDiscoveryReq(req) => {
                 self.handle_system_server_discovery_request(&req, indication, seq).await
             }
             TransactionData::BindReq(req) => self.handle_bind_request(&req, indication, seq).await,
-            TransactionData::UnbindReq(req) => self.handle_unbind_request(&req, indication, seq).await,
+            TransactionData::UnbindReq(req) => {
+                self.handle_unbind_request(&req, indication, seq).await
+            }
             _ => {
                 log::warn!(
-                "ZDP command with cluster_id {:?} not implemented",
-                indication.cluster_id
-            );
-                Err(ApsdeError::NotSupported(
-                    "command not implemented for cluster",
-                ))
+                    "ZDP command with cluster_id {:?} not implemented",
+                    indication.cluster_id
+                );
+                Err(ApsdeError::NotSupported("command not implemented for cluster"))
             }
         }
     }
@@ -228,7 +224,8 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
     ) -> OptionalApsdeResult {
         match indication.dst.is_broadcast() {
             true => to_optional(
-                self.transmit_zdp_command(indication.src, transaction_data, seq_number.into()).await,
+                self.transmit_zdp_command(indication.src, transaction_data, seq_number.into())
+                    .await,
             ),
             false => Ok(None),
         }
@@ -254,7 +251,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                     TransactionData::NwkAddrRsp(rsp),
                     seq_number,
                 )
-                    .await
+                .await
             }
             Some(addr) => {
                 match req.request_type {
@@ -268,12 +265,11 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                 };
                 to_optional(
                     self.transmit_zdp_command(
-
                         indication.src,
                         TransactionData::NwkAddrRsp(rsp),
                         seq_number.into(),
                     )
-                        .await,
+                    .await,
                 )
             }
         }
@@ -300,7 +296,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                     TransactionData::IeeeAddrRsp(rsp),
                     seq_number,
                 )
-                    .await
+                .await
             }
             Some(addr) => {
                 match req.request_type {
@@ -314,12 +310,11 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                 }
                 to_optional(
                     self.transmit_zdp_command(
-
                         indication.src,
                         TransactionData::IeeeAddrRsp(rsp),
                         seq_number.into(),
                     )
-                        .await,
+                    .await,
                 )
             }
         }
@@ -352,7 +347,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             TransactionData::NodeDescRsp(rsp),
             seq_number.into(),
         )
-            .await
+        .await
     }
 
     pub(crate) async fn emit_node_desc_request(
@@ -360,16 +355,14 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         nwk_addr_of_interest: NwkAddress,
         seq_number: u8,
     ) -> ApsdeResult {
-        let node_desc_req = NodeDescReq {
-            nwk_addr_of_interest,
-        };
+        let node_desc_req = NodeDescReq { nwk_addr_of_interest };
 
         self.transmit_zdp_command(
             ApsdeAddress::Network(nwk_addr_of_interest, ZDP_ENDPOINT),
             TransactionData::NodeDescReq(node_desc_req),
             seq_number.into(),
         )
-            .await
+        .await
     }
 
     // TODO: JOIN with upper func
@@ -422,12 +415,11 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         }
 
         self.transmit_zdp_command(
-
             indication.src,
             TransactionData::PowerDescRsp(rsp),
             seq_number.into(),
         )
-            .await
+        .await
     }
 
     async fn handle_simple_desc_request(
@@ -443,11 +435,13 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         };
 
         if req.endpoint.get() == 0 || req.endpoint.get() > 240 {
-            return self.transmit_zdp_command(
-                indication.src,
-                TransactionData::SimpleDescRsp(rsp),
-                seq_number.into(),
-            ).await;
+            return self
+                .transmit_zdp_command(
+                    indication.src,
+                    TransactionData::SimpleDescRsp(rsp),
+                    seq_number.into(),
+                )
+                .await;
         }
 
         match self.get_status_and_neighbours(req.nwk_addr_of_interest) {
@@ -472,7 +466,8 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             indication.src,
             TransactionData::SimpleDescRsp(rsp),
             seq_number.into(),
-        ).await
+        )
+        .await
     }
 
     async fn handle_active_ep_request(
@@ -490,10 +485,8 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         match self.get_status_and_neighbours(req.nwk_addr_of_interest) {
             StatusResult::ThisDevice(_) => {
                 rsp.status = DescRspStatus::Success;
-                rsp.active_ep_list = self.applications
-                    .keys()
-                    .map(|key| *key)
-                    .collect::<zb_types::Vec<_, _>>();
+                rsp.active_ep_list =
+                    self.applications.keys().map(|key| *key).collect::<zb_types::Vec<_, _>>();
             }
             StatusResult::Neighbour(_) => rsp.status = DescRspStatus::NoDescriptor,
             StatusResult::InvRequestType => rsp.status = DescRspStatus::InvRequestType,
@@ -505,7 +498,8 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             indication.src,
             TransactionData::ActiveEpRsp(rsp),
             seq_number.into(),
-        ).await
+        )
+        .await
     }
 
     async fn handle_match_desc_request(
@@ -553,7 +547,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                         TransactionData::MatchDescRsp(rsp),
                         seq_number.into(),
                     )
-                        .await,
+                    .await,
                 )
             };
         }
@@ -568,7 +562,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         } else {
             self.ctx.get_nwk().lock_neighbors(|nbs| {
                 match nbs
-                    .children
+                    .neighbors
                     .iter()
                     .find(|item| item.device_type == DeviceType::EndDevice && item.nwk_addr == addr)
                 {
@@ -598,7 +592,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                         TransactionData::MatchDescRsp(rsp),
                         seq_number.into(),
                     )
-                        .await,
+                    .await,
                 );
             }
         }
@@ -614,7 +608,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                 TransactionData::MatchDescRsp(rsp),
                 seq_number.into(),
             )
-                .await,
+            .await,
         )
     }
 
@@ -640,18 +634,21 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         indication: &ApsdeDataIndication,
     ) -> OptionalApsdeResult {
         match self.ctx.get_nwk().lock_neighbors(|nbs| {
-            nbs.find_by_ext_addr_and_type(req.ieee_addr, DeviceType::EndDevice).is_some() && indication.dst.is_broadcast()
+            nbs.find_by_ext_addr_and_type(req.ieee_addr, DeviceType::EndDevice).is_some()
+                && indication.dst.is_broadcast()
         }) {
             true => {
                 if let ApsdeAddress::Group(addr) = indication.src {
-                    if self.ctx.get_nwk()
+                    if self
+                        .ctx
+                        .get_nwk()
                         .get_broadcast_transaction_table()
                         .iter()
                         .find(|rec| rec.source_address == addr) // TODO: Check how to get the NKW frame's sequence number here
                         .is_none()
                     {
                         self.ctx.get_nwk_mut().lock_neighbors_mut(|nbs| {
-                            nbs.children.retain(|nb| nb.ext_addr != Some(req.ieee_addr))
+                            nbs.neighbors.retain(|nb| nb.ext_addr != Some(req.ieee_addr))
                         });
                     }
                 }
@@ -662,9 +659,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         Ok(None)
     }
 
-    pub(crate) async fn emit_device_annce(
-        &mut self,
-    ) -> ApsdeResult {
+    pub(crate) async fn emit_device_annce(&mut self) -> ApsdeResult {
         let annce = DeviceAnnce {
             nwk_addr: self.ctx.get_nwk().get_addr(),
             ieee_addr: self.ctx.get_nwk().get_ext_addr(),
@@ -672,12 +667,11 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         };
 
         self.transmit_zdp_command(
-
             ApsdeAddress::Network(NwkAddress::BROADCAST_RX_ON_IDLE, ZDP_ENDPOINT),
             TransactionData::DeviceAnnce(annce),
             None,
         )
-            .await
+        .await
     }
 
     async fn handle_parent_annce(
@@ -686,14 +680,12 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         indication: &ApsdeDataIndication,
         seq_number: u8,
     ) -> OptionalApsdeResult {
-        let mut rsp = ParentAnnceRsp {
-            status: ParentAnnceRspStatus::Success,
-            children: Default::default(),
-        };
+        let mut rsp =
+            ParentAnnceRsp { status: ParentAnnceRspStatus::Success, children: Default::default() };
 
         match self.ctx.get_nwk().lock_neighbors(|nbs| {
             rsp.children = nbs
-                .children
+                .neighbors
                 .iter()
                 .filter(|item| item.ext_addr.is_some())
                 .filter(|item| {
@@ -710,8 +702,11 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             _ => {}
         }
 
-        let jitter = self.ctx.get_nwk_mut().get_rng().random_range(0.0..PARENT_ANNOUNCE_JITTER_MAX_SECONDS);
-        self.ctx.get_aps_mut().set_parent_announce_timer(PARENT_ANNOUNCE_BASE_TIMER_SECONDS + jitter);
+        let jitter =
+            self.ctx.get_nwk_mut().get_rng().random_range(0.0..PARENT_ANNOUNCE_JITTER_MAX_SECONDS);
+        self.ctx
+            .get_aps_mut()
+            .set_parent_announce_timer(PARENT_ANNOUNCE_BASE_TIMER_SECONDS + jitter);
 
         to_optional(
             self.transmit_zdp_command(
@@ -719,7 +714,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                 TransactionData::ParentAnnceRsp(rsp),
                 seq_number.into(),
             )
-                .await,
+            .await,
         )
     }
 
@@ -745,7 +740,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                     }),
                     seq_number.into(),
                 )
-                    .await,
+                .await,
             )
         }
     }
@@ -757,29 +752,25 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         req: MgmtPermitJoiningReq,
         destination: ApsdeAddress,
     ) -> Result<MgmtPermitJoiningRsp, ApsdeError> {
-        self.transmit_zdp_command(
-            destination,
-            TransactionData::MgmtPermitJoiningReq(req),
-            None,
-        )
+        self.transmit_zdp_command(destination, TransactionData::MgmtPermitJoiningReq(req), None)
             .await?;
 
         let timeout = Duration::from_secs(1);
-        self.ctx.get_aps_mut().wait_for_indication(timeout, |indication| {
-            return match indication {
-                ApsIndication::Data(ApsdeDataIndication {
-                                        profile_id: 0,
-                                        cluster_id: ZdpClusterIds::MGMT_PERMIT_JOINING_RSP,
-                                        asdu,
-                                        ..
-                                    }) => Some(
-                    MgmtPermitJoiningRsp::try_read(asdu.as_slice(), byte::LE)
-                        .unwrap()
-                        .0,
-                ),
-                _ => None,
-            };
-        })
+        self.ctx
+            .get_aps_mut()
+            .wait_for_indication(timeout, |indication| {
+                return match indication {
+                    ApsIndication::Data(ApsdeDataIndication {
+                        profile_id: 0,
+                        cluster_id: ZdpClusterIds::MGMT_PERMIT_JOINING_RSP,
+                        asdu,
+                        ..
+                    }) => {
+                        Some(MgmtPermitJoiningRsp::try_read(asdu.as_slice(), byte::LE).unwrap().0)
+                    }
+                    _ => None,
+                };
+            })
             .await
             .map_err(|err| {
                 log::warn!("unsuccessful mgmt_permit_joining_req: {:?}", err);
@@ -805,7 +796,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             Ok(_) => BindStatus::Success,
             Err(err) => match err {
                 ApsmeBindError::TableFull => BindStatus::TableFull,
-            }
+            },
         };
 
         to_optional(
@@ -814,7 +805,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                 TransactionData::BindRsp(status),
                 seq_number.into(),
             )
-                .await,
+            .await,
         )
     }
 
@@ -833,7 +824,7 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
             Err(err) => match err {
                 ApsmeUnbindError::IllegalRequest => UnbindStatus::NotAuthorized,
                 ApsmeUnbindError::InvalidBinding => UnbindStatus::NoEntry,
-            }
+            },
         };
 
         to_optional(
@@ -842,10 +833,9 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
                 TransactionData::UnbindRsp(status),
                 seq_number.into(),
             )
-                .await,
+            .await,
         )
     }
 
     // ---------------------------
 }
-

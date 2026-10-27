@@ -1,6 +1,5 @@
 use embassy_time::Duration;
 
-
 pub const fn from_octets(octets: u64) -> Duration {
     Duration::from_millis(octets * (8 / 250))
 }

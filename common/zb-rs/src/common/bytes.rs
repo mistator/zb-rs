@@ -135,7 +135,7 @@ impl<L: Integer, T: TryWrite<Endian> + Clone> TryWrite<Endian> for &WithLength<L
         check_len(bytes, num_size)?;
 
         let mut offset = num_size;
-        
+
         match **self {
             None => {
                 L::ZERO.to_le_bytes(&mut bytes[..num_size]);

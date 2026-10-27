@@ -1,15 +1,15 @@
 use crate::nwk::commands::Command;
+use crate::nwk::constants::NWK_LEAVE_REQUEST_ALLOWED;
+use crate::nwk::ctx::{InitializedNwk, JoinedAsEndDevice, JoinedState, Nwk, RoutingState};
 use crate::nwk::frame::CommandFrame;
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nlde::{NlmeLeaveIndication, TransferResult};
+use crate::nwk::service::routing::ReceivedCommandFrame;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::BitStruct;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::nwk::constants::NWK_LEAVE_REQUEST_ALLOWED;
-use crate::nwk::ctx::{InitializedNwk, JoinedAsEndDevice, JoinedNwk, JoinedState, Nwk, RoutingState};
-use crate::nwk::service::routing::ReceivedCommandFrame;
 
 #[derive(BitStruct, Clone, Copy, Debug)]
 #[bit_struct(repr = u8)]
@@ -21,7 +21,12 @@ pub struct Leave {
 }
 
 impl<T: JoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
-    pub async fn emit_leave_cmd(&mut self, config: Leave, dest: NwkAddress, dest_ext: Option<ExtendedAddress>) -> TransferResult {
+    pub async fn emit_leave_cmd(
+        &mut self,
+        config: Leave,
+        dest: NwkAddress,
+        dest_ext: Option<ExtendedAddress>,
+    ) -> TransferResult {
         let cmd = Command::Leave(config);
 
         let frame = NwkFrame::NwkCommand(CommandFrame {
@@ -38,20 +43,30 @@ impl<T: JoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
 }
 
 impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
-    pub async fn handle_leave_request(&mut self, frame: &ReceivedCommandFrame<'_, Leave>) -> Option<NlmeLeaveIndication> {
+    pub async fn handle_leave_request(
+        &mut self,
+        frame: &ReceivedCommandFrame<'_, Leave>,
+    ) -> Option<NlmeLeaveIndication> {
         if frame.cmd.request {
             self.handle_leave_request_request(frame).await
         } else {
-            self.lock_neighbors_mut(|nbs|
-                nbs.children.retain(|child| child.nwk_addr != frame.header.source));
+            self.lock_neighbors_mut(|nbs| {
+                nbs.neighbors.retain(|child| child.nwk_addr != frame.header.source)
+            });
 
             if frame.header.source == self.lock_parent(|parent| parent.nwk_addr) {
                 if frame.cmd.remove_children {
-                    self.emit_leave_cmd(Leave {
-                        request: false,
-                        rejoin: frame.cmd.rejoin,
-                        remove_children: frame.cmd.remove_children,
-                    }, NwkAddress::MAX, frame.header.source_ieee).await.ok();
+                    self.emit_leave_cmd(
+                        Leave {
+                            request: false,
+                            rejoin: frame.cmd.rejoin,
+                            remove_children: frame.cmd.remove_children,
+                        },
+                        NwkAddress::MAX,
+                        frame.header.source_ieee,
+                    )
+                    .await
+                    .ok();
                 }
 
                 Some(NlmeLeaveIndication::LeaveParent { rejoin: frame.cmd.rejoin })
@@ -61,23 +76,35 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         }
     }
 
-    pub async fn handle_leave_request_request(&mut self, frame: &ReceivedCommandFrame<'_, Leave>) -> Option<NlmeLeaveIndication> {
+    pub async fn handle_leave_request_request(
+        &mut self,
+        frame: &ReceivedCommandFrame<'_, Leave>,
+    ) -> Option<NlmeLeaveIndication> {
         if frame.header.destination.is_broadcast() || !NWK_LEAVE_REQUEST_ALLOWED {
             return None;
         }
 
-        self.emit_leave_cmd(Leave {
-            request: false,
-            rejoin: frame.cmd.rejoin,
-            remove_children: frame.cmd.remove_children,
-        }, NwkAddress::MAX, None).await.ok();
+        self.emit_leave_cmd(
+            Leave {
+                request: false,
+                rejoin: frame.cmd.rejoin,
+                remove_children: frame.cmd.remove_children,
+            },
+            NwkAddress::MAX,
+            None,
+        )
+        .await
+        .ok();
 
         Some(NlmeLeaveIndication::LeaveSelf { rejoin: frame.cmd.rejoin })
     }
 }
 
 impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
-    pub async fn handle_leave_request(&mut self, frame: &ReceivedCommandFrame<'_, Leave>) -> Option<NlmeLeaveIndication>{
+    pub async fn handle_leave_request(
+        &mut self,
+        frame: &ReceivedCommandFrame<'_, Leave>,
+    ) -> Option<NlmeLeaveIndication> {
         if frame.cmd.request {
             return self.handle_leave_request_request(frame).await;
         } else {
@@ -89,18 +116,22 @@ impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
         None
     }
 
-    pub async fn handle_leave_request_request(&mut self, frame: &ReceivedCommandFrame<'_, Leave>) -> Option<NlmeLeaveIndication> {
+    pub async fn handle_leave_request_request(
+        &mut self,
+        frame: &ReceivedCommandFrame<'_, Leave>,
+    ) -> Option<NlmeLeaveIndication> {
         let (nwk_addr, ext_addr) = self.lock_parent(|parent| (parent.nwk_addr, parent.ext_addr));
-        if frame.header.destination.is_broadcast() || nwk_addr != frame.header.source
-        {
-            return None
+        if frame.header.destination.is_broadcast() || nwk_addr != frame.header.source {
+            return None;
         }
 
-        self.emit_leave_cmd(Leave {
-            request: false,
-            rejoin: frame.cmd.rejoin,
-            remove_children: false,
-        }, nwk_addr, ext_addr.into()).await.ok();
+        self.emit_leave_cmd(
+            Leave { request: false, rejoin: frame.cmd.rejoin, remove_children: false },
+            nwk_addr,
+            ext_addr.into(),
+        )
+        .await
+        .ok();
 
         Some(NlmeLeaveIndication::LeaveSelf { rejoin: frame.cmd.rejoin })
     }
@@ -108,23 +139,24 @@ impl<D: NwkMac, S: StorageRegion> Nwk<JoinedAsEndDevice, D, S> {
 
 #[cfg(test)]
 mod tests {
-    use core::assert_matches;
-    use crate::nwk::nlde::NlmeLeaveIndication;
-    use crate::nwk::nlde::NwkIndication;
-    use embassy_time::{Duration, WithTimeout};
-    use zb_types::common::NwkAddress;
     use crate::assert_timeout;
     use crate::nwk::commands::Command;
-    use crate::nwk::commands::leave::{Leave};
-    use crate::nwk::ctx::{BaseNwk, BaseNwkPrivate, InitializedNwk, Nwk, NwkListen};
-    use crate::nwk::ctx::tests::{DEFAULT_CHILD_EXT_ADDR, DEFAULT_CHILD_NWK_ADDR, DEFAULT_PARENT_EXT_ADDR, DEFAULT_PARENT_NWK_ADDR};
-    use crate::nwk::frame::{CommandFrame, NwkFrame};
+    use crate::nwk::commands::leave::Leave;
+    use crate::nwk::ctx::tests::{
+        DEFAULT_CHILD_EXT_ADDR, DEFAULT_CHILD_NWK_ADDR, DEFAULT_PARENT_EXT_ADDR,
+        DEFAULT_PARENT_NWK_ADDR,
+    };
+    use crate::nwk::ctx::{BaseNwk, InitializedNwk, Nwk, NwkListen};
     use crate::nwk::frame::header::NwkHeader;
+    use crate::nwk::frame::{CommandFrame, NwkFrame};
+    use crate::nwk::nlde::NlmeLeaveIndication;
+    use crate::nwk::nlde::NwkIndication;
+    use core::assert_matches;
+    use embassy_time::{Duration, WithTimeout};
+    use zb_types::common::NwkAddress;
 
     #[futures_test::test]
-    async fn coordinator_drops_leave_request() {
-
-    }
+    async fn coordinator_drops_leave_request() {}
 
     #[futures_test::test]
     async fn leave_request_with_request_field_true_is_dropped_if_address_is_broadcast() {
@@ -137,11 +169,7 @@ mod tests {
                 .destination_ieee(ext_addr)
                 .radius(1)
                 .call(),
-            command: Command::Leave(Leave {
-                rejoin: false,
-                request: true,
-                remove_children: false,
-            })
+            command: Command::Leave(Leave { rejoin: false, request: true, remove_children: false }),
         });
 
         nwk.add_received_frame(&frame);
@@ -160,11 +188,7 @@ mod tests {
                 .destination_ieee(ext_addr)
                 .radius(1)
                 .call(),
-            command: Command::Leave(Leave {
-                rejoin: true,
-                request: true,
-                remove_children: false,
-            })
+            command: Command::Leave(Leave { rejoin: true, request: true, remove_children: false }),
         });
 
         nwk.add_received_frame(&frame);
@@ -178,14 +202,12 @@ mod tests {
                 assert_eq!(leave.rejoin, true);
                 assert_eq!(leave.remove_children, false);
             }
-            _ => panic!("invalid frame sent")
+            _ => panic!("invalid frame sent"),
         }
     }
 
     #[futures_test::test]
-    async fn router_drops_leave_request_if_nwk_leave_request_allowed_is_false() {
-
-    }
+    async fn router_drops_leave_request_if_nwk_leave_request_allowed_is_false() {}
 
     #[futures_test::test]
     async fn router_leaves_if_parent_has_left_and_children_should_leave() {
@@ -199,11 +221,7 @@ mod tests {
                 .destination_ieee(ext_addr)
                 .radius(1)
                 .call(),
-            command: Command::Leave(Leave {
-                rejoin: true,
-                request: false,
-                remove_children: true,
-            })
+            command: Command::Leave(Leave { rejoin: true, request: false, remove_children: true }),
         });
         frame.header_mut().source = DEFAULT_PARENT_NWK_ADDR;
         frame.header_mut().source_ieee = Some(DEFAULT_PARENT_EXT_ADDR);
@@ -211,7 +229,10 @@ mod tests {
         nwk.add_received_frame(&frame);
         let indication = nwk.listen_nwk(true).with_timeout(Duration::from_millis(100)).await.ok();
 
-        assert_matches!(indication, Some(NwkIndication::Leave(NlmeLeaveIndication::LeaveParent {..})));
+        assert_matches!(
+            indication,
+            Some(NwkIndication::Leave(NlmeLeaveIndication::LeaveParent { .. }))
+        );
         let sent_frame = nwk.get_last_transmitted_frame().unwrap();
 
         assert_eq!(sent_frame.header().destination, NwkAddress::BROADCAST_RX_ON_IDLE);
@@ -221,7 +242,7 @@ mod tests {
                 assert_eq!(leave.rejoin, true);
                 assert_eq!(leave.remove_children, true);
             }
-            _ => panic!("invalid frame sent")
+            _ => panic!("invalid frame sent"),
         }
     }
 
@@ -237,11 +258,7 @@ mod tests {
                 .destination_ieee(ext_addr)
                 .radius(1)
                 .call(),
-            command: Command::Leave(Leave {
-                rejoin: true,
-                request: false,
-                remove_children: true,
-            })
+            command: Command::Leave(Leave { rejoin: true, request: false, remove_children: true }),
         });
         frame.header_mut().source = DEFAULT_CHILD_NWK_ADDR;
         frame.header_mut().source_ieee = Some(DEFAULT_CHILD_EXT_ADDR);
@@ -251,7 +268,7 @@ mod tests {
 
         let sent_frame = nwk.get_last_transmitted_frame();
         assert!(sent_frame.is_none());
-        assert!(nwk.lock_neighbors(|nbs| nbs.children.is_empty()));
+        assert!(nwk.lock_neighbors(|nbs| nbs.neighbors.is_empty()));
     }
 
     #[futures_test::test]
@@ -266,11 +283,7 @@ mod tests {
                 .destination_ieee(ext_addr)
                 .radius(1)
                 .call(),
-            command: Command::Leave(Leave {
-                rejoin: true,
-                request: true,
-                remove_children: false,
-            })
+            command: Command::Leave(Leave { rejoin: true, request: true, remove_children: false }),
         });
 
         nwk.add_received_frame(&frame);
@@ -289,11 +302,7 @@ mod tests {
                 .destination_ieee(ext_addr)
                 .radius(1)
                 .call(),
-            command: Command::Leave(Leave {
-                rejoin: true,
-                request: true,
-                remove_children: false,
-            })
+            command: Command::Leave(Leave { rejoin: true, request: true, remove_children: false }),
         });
         frame.header_mut().source = DEFAULT_PARENT_NWK_ADDR;
         frame.header_mut().source_ieee = Some(DEFAULT_PARENT_EXT_ADDR);
@@ -309,7 +318,7 @@ mod tests {
                 assert_eq!(leave.rejoin, true);
                 assert_eq!(leave.remove_children, false);
             }
-            _ => panic!("invalid frame sent")
+            _ => panic!("invalid frame sent"),
         }
     }
 
@@ -325,18 +334,17 @@ mod tests {
                 .destination_ieee(ext_addr)
                 .radius(1)
                 .call(),
-            command: Command::Leave(Leave {
-                rejoin: true,
-                request: false,
-                remove_children: false,
-            })
+            command: Command::Leave(Leave { rejoin: true, request: false, remove_children: false }),
         });
         frame.header_mut().source = DEFAULT_PARENT_NWK_ADDR;
         frame.header_mut().source_ieee = Some(DEFAULT_PARENT_EXT_ADDR);
 
         nwk.add_received_frame(&frame);
         let indication = nwk.listen_nwk(true).with_timeout(Duration::from_millis(100)).await.ok();
-        assert_matches!(indication, Some(NwkIndication::Leave(NlmeLeaveIndication::LeaveParent {..})));
+        assert_matches!(
+            indication,
+            Some(NwkIndication::Leave(NlmeLeaveIndication::LeaveParent { .. }))
+        );
 
         let sent_frame = nwk.get_last_transmitted_frame();
         assert!(sent_frame.is_none());

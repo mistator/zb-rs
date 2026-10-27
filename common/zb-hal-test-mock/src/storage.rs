@@ -9,9 +9,7 @@ pub struct MemoryStorage {
 
 impl MemoryStorage {
     pub const fn new() -> Self {
-        Self {
-            buffer: [0u8; 1024 * 16],
-        }
+        Self { buffer: [0u8; 1024 * 16] }
     }
 }
 

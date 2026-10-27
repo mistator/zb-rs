@@ -1,4 +1,5 @@
 use crate::nwk::commands::Command;
+use crate::nwk::ctx::{Nwk, RoutingState};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nlde::TransferResult;
@@ -10,7 +11,6 @@ use zb_hal::{NwkMac, StorageRegion};
 use zb_macros::try_write_impl;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::nwk::ctx::{Nwk, RoutingState};
 
 #[derive(Clone, Copy, Debug)]
 pub enum RejoinResponse {
@@ -29,9 +29,7 @@ impl<'a> TryRead<'a, Endian> for RejoinResponse {
             0 => Ok((Self::Success(nwk_addr), *offset)),
             1 => Ok((Self::PanAtCapacity, *offset)),
             2 => Ok((Self::AccessDenied, *offset)),
-            _ => Err(byte::Error::BadInput {
-                err: "invalid rejoin response status received",
-            }),
+            _ => Err(byte::Error::BadInput { err: "invalid rejoin response status received" }),
         }
     }
 }
@@ -66,11 +64,8 @@ pub struct RejoinResponseCmd {
     pub rejoin_response: RejoinResponse,
 }
 
-impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S>  {
-    pub async fn send_rejoin_response_cmd(
-        &mut self,
-        cfg: &RejoinResponseCmd,
-    ) -> TransferResult {
+impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
+    pub async fn send_rejoin_response_cmd(&mut self, cfg: &RejoinResponseCmd) -> TransferResult {
         let hdr = NwkHeader::cmd(self)
             .destination(cfg.dst_addr)
             .destination_ieee(cfg.ext_dst_addr)
@@ -82,4 +77,3 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S>  {
         self.transmit_frame(&frame, cfg.dst_addr, true).await
     }
 }
-

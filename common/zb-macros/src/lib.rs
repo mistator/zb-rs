@@ -1,11 +1,13 @@
 mod bit_struct;
-mod utils;
 mod impl_block;
+mod utils;
 mod zcl;
 
 use crate::bit_struct::BitStructDef;
 use crate::impl_block::ImplBlock;
-use crate::zcl::{ZclAttr, ZclAttrParams, ZclAttrStructDef, ZclCluster, ZclClusterParams, ZclClusterStructDef};
+use crate::zcl::{
+    ZclAttr, ZclAttrParams, ZclAttrStructDef, ZclCluster, ZclClusterParams, ZclClusterStructDef,
+};
 use proc_macro::TokenStream;
 use quote::ToTokens;
 use syn::parse_macro_input;
@@ -19,7 +21,7 @@ pub fn bit_struct(input: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn try_write_impl(_: TokenStream, item: TokenStream) -> TokenStream {
     let item_impl = parse_macro_input!(item as syn::ItemImpl);
-    let impl_block = ImplBlock {item_impl};
+    let impl_block = ImplBlock { item_impl };
     impl_block.to_token_stream().into()
 }
 

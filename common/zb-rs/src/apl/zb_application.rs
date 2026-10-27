@@ -18,7 +18,8 @@ pub const APPLICATION_STORAGE_SIZE: usize = 1024;
 pub const APPLICATIONS_SR_SIZE: usize = MAX_APPLICATIONS * APPLICATION_STORAGE_SIZE;
 
 pub type ZbApplication = Arc<Mutex<CriticalSectionRawMutex, Box<dyn ZigbeeApplication>>>;
-pub type ZbApplicationsDef = heapless::index_map::FnvIndexMap<ApsEndpoint, ZbApplication, MAX_APPLICATIONS>;
+pub type ZbApplicationsDef =
+    heapless::index_map::FnvIndexMap<ApsEndpoint, ZbApplication, MAX_APPLICATIONS>;
 pub type ZbApplications<S> = ZbApplicationsMap<S>;
 
 #[derive(Deref, DerefMut, IntoIterator)]
@@ -63,9 +64,12 @@ impl<S: StorageRegion> ZbApplicationsMap<S> {
 
             if let Ok(()) = self.stg.load_with_offset(offset, &mut bytes) {
                 let mut guard = app.lock().await;
-                guard.load(&bytes).map_err(|err| {
-                    log::warn!("error loading app data from persistent storage: {:?}", err);
-                }).ok();
+                guard
+                    .load(&bytes)
+                    .map_err(|err| {
+                        log::warn!("error loading app data from persistent storage: {:?}", err);
+                    })
+                    .ok();
             }
         }
     }
@@ -74,7 +78,7 @@ impl<S: StorageRegion> ZbApplicationsMap<S> {
         &mut self,
         ep: ApsEndpoint,
         cluster_id: u16,
-        cb: F
+        cb: F,
     ) -> Result<T, UseAppError> {
         let application = self.applications.get(&ep).ok_or_else(|| {
             log::warn!("could not find application in endpoint `{:?}`", ep);
@@ -85,7 +89,11 @@ impl<S: StorageRegion> ZbApplicationsMap<S> {
         let result = {
             let mut application = application.lock().await;
             let cluster = application.get_cluster_by_id_mut(cluster_id).ok_or_else(|| {
-                log::warn!("could not find cluster {:?} for application in endpoint `{:?}`", cluster_id, ep);
+                log::warn!(
+                    "could not find cluster {:?} for application in endpoint `{:?}`",
+                    cluster_id,
+                    ep
+                );
                 UseAppError::ClusterNotFound
             })?;
 
@@ -99,6 +107,3 @@ impl<S: StorageRegion> ZbApplicationsMap<S> {
         Ok(result)
     }
 }
-
-
-

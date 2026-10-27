@@ -102,13 +102,7 @@ impl<'a> TryRead<'a, Endian> for ZclFrame {
             ZclFrameType::Specific => ZclFrameCommand::Specific(bytes.read_with(offset, byte::LE)?),
         };
 
-        Ok((
-            Self {
-                header,
-                command: cmd,
-            },
-            *offset,
-        ))
+        Ok((Self { header, command: cmd }, *offset))
     }
 }
 
@@ -119,7 +113,7 @@ pub struct ZclFrameControl {
     pub frame_type: ZclFrameType,
     pub manufacturer_specific: bool,
     pub direction: ZclDirection,
-    pub disable_default_response: bool
+    pub disable_default_response: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, TryRead, TryWrite)]

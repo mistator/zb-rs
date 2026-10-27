@@ -7,8 +7,8 @@ use crate::common::security::frame::SecurityLevel;
 #[derive(Clone, Copy, Debug, Default, PartialEq, TryRead, TryWrite)]
 #[repr(u8)]
 pub enum StackProfile {
-    #[default]
     Zigbee = 0x01,
+    #[default]
     ZigbeePro = 0x02,
 }
 

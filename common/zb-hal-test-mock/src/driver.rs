@@ -1,11 +1,11 @@
 use alloc::collections::VecDeque;
-use bon::{Builder};
+use bon::Builder;
 use byte::TryRead;
 use zb_hal::{Ieee802154Driver, NwkMac};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
 use zb_types::common::PanId;
-use zb_types::mac::{Channel, ChannelMask, MacFrame};
+use zb_types::mac::{Channel, ChannelMask, MacFrame, ReceivedMacFrame};
 
 pub const DEFAULT_EXT_ADDR: ExtendedAddress = ExtendedAddress(0x1234_5678_90ab_cdef);
 pub const DEFAULT_NWK_ADDR: NwkAddress = NwkAddress(0x1234);
@@ -24,33 +24,47 @@ pub struct MockDriver {
     channel: Channel,
 
     #[builder(default = VecDeque::new())]
-    received_queue: VecDeque<MacFrame>,
+    received_queue: VecDeque<ReceivedMacFrame>,
     #[builder(default = VecDeque::new())]
     transmitted_queue: VecDeque<MacFrame>,
 }
 
 impl Ieee802154Driver for MockDriver {
-    fn get_extended_address(&self) -> ExtendedAddress { self.extended_address }
+    fn get_extended_address(&self) -> ExtendedAddress {
+        self.extended_address
+    }
 
-    fn get_channel_mask(&self) -> ChannelMask { ChannelMask::default() }
+    fn get_channel_mask(&self) -> ChannelMask {
+        ChannelMask::default()
+    }
 
     fn is_rx_on_when_idle(&self) -> bool {
         self.rx_on_when_idle
     }
 
-    fn get_pan_id(&self) -> Option<PanId> { self.pan_id }
+    fn get_pan_id(&self) -> Option<PanId> {
+        self.pan_id
+    }
 
-    fn set_pan_id(&mut self, pan_id: Option<PanId>) -> () { self.pan_id = pan_id; }
+    fn set_pan_id(&mut self, pan_id: Option<PanId>) -> () {
+        self.pan_id = pan_id;
+    }
 
-    fn get_short_address(&self) -> Option<NwkAddress> { self.short_addr }
+    fn get_short_address(&self) -> Option<NwkAddress> {
+        self.short_addr
+    }
 
     fn set_short_address(&mut self, short_addr: Option<NwkAddress>) -> () {
         self.short_addr = short_addr;
     }
 
-    fn get_channel(&self) -> Channel { self.channel }
+    fn get_channel(&self) -> Channel {
+        self.channel
+    }
 
-    fn set_channel(&mut self, channel: Channel) -> () { self.channel = channel; }
+    fn set_channel(&mut self, channel: Channel) -> () {
+        self.channel = channel;
+    }
 
     async fn transmit(&mut self, buffer: &[u8]) -> Result<(), byte::Error> {
         let (frame, _) = MacFrame::try_read(buffer, ())?;
@@ -58,15 +72,13 @@ impl Ieee802154Driver for MockDriver {
         Ok(())
     }
 
-    fn flush(&mut self) -> () {
-        self.received_queue.clear()
-    }
+    fn flush(&mut self) -> () {}
 
-    fn poll(&mut self) -> Option<MacFrame> {
+    fn poll(&mut self) -> Option<ReceivedMacFrame> {
         self.received_queue.pop_front()
     }
 
-    async fn wait_frame(&mut self) -> MacFrame {
+    async fn wait_frame(&mut self) -> ReceivedMacFrame {
         let frame = self.received_queue.pop_front();
         if let Some(frame) = frame {
             return frame;
@@ -86,17 +98,14 @@ impl Ieee802154Driver for MockDriver {
 
 impl MockDriver {
     pub fn default() -> Self {
-        Self::builder()
-            .pan_id(DEFAULT_NWK_PAN_ID)
-            .short_addr(DEFAULT_NWK_ADDR)
-            .build()
+        Self::builder().pan_id(DEFAULT_NWK_PAN_ID).short_addr(DEFAULT_NWK_ADDR).build()
     }
 
     pub fn default_not_connected() -> Self {
         Self::builder().build()
     }
 
-    pub fn add_received_frame(&mut self, frame: MacFrame) -> () {
+    pub fn add_received_frame(&mut self, frame: ReceivedMacFrame) -> () {
         self.received_queue.push_back(frame);
     }
 

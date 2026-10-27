@@ -57,7 +57,9 @@ cfg_if! {
 pub struct Vec<T, const N: usize>(#[into_iterator(owned, ref, ref_mut)] InnerVec<T, N>);
 
 impl<T, const N: usize> Vec<T, N> {
-    pub fn new() -> Self { Self(InnerVec::<T, N>::default()) }
+    pub fn new() -> Self {
+        Self(InnerVec::<T, N>::default())
+    }
 
     pub fn push(&mut self, value: T) -> result!((), T) {
         call!(self.0.push(value))
@@ -65,7 +67,7 @@ impl<T, const N: usize> Vec<T, N> {
 }
 
 impl<T, const N: usize> FromIterator<T> for Vec<T, N> {
-    fn from_iter<I: IntoIterator<Item=T>>(iter: I) -> Self {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         Self(InnerVec::<T, N>::from_iter(iter))
     }
 }
@@ -83,14 +85,17 @@ impl<T: Clone, const N: usize> From<&[T]> for Vec<T, N> {
 }
 
 #[derive(Debug, Clone, Deref, DerefMut, IntoIterator, Default)]
-pub struct HashMap<K, V, const N: usize>(#[into_iterator(owned, ref, ref_mut)] InnerHashMap<K, V, N>);
+pub struct HashMap<K, V, const N: usize>(
+    #[into_iterator(owned, ref, ref_mut)] InnerHashMap<K, V, N>,
+);
 
 impl<K, V, const N: usize> HashMap<K, V, N> {
-    pub fn new() -> Self { Self(InnerHashMap::<K, V, N>::default()) }
+    pub fn new() -> Self {
+        Self(InnerHashMap::<K, V, N>::default())
+    }
 }
 
-impl<K: Eq + Hash, V, const N: usize> HashMap<K, V, N>
-{
+impl<K: Eq + Hash, V, const N: usize> HashMap<K, V, N> {
     pub fn insert(&mut self, key: K, value: V) -> result!(Option<V>, (K, V)) {
         call!(self.0.insert(key, value))
     }
@@ -100,12 +105,18 @@ impl<K: Eq + Hash, V, const N: usize> HashMap<K, V, N>
 pub struct HashSet<T, const N: usize>(#[into_iterator(owned, ref, ref_mut)] InnerHashSet<T, N>);
 
 impl<T, const N: usize> HashSet<T, N> {
-    pub fn new() -> Self { Self(InnerHashSet::<T, N>::default()) }
+    pub fn new() -> Self {
+        Self(InnerHashSet::<T, N>::default())
+    }
 }
 
 impl<T: Eq + Hash, const N: usize> HashSet<T, N> {
-    pub fn insert(&mut self, value: T) -> result!(bool, T) { call!(self.0.insert(value)) }
-    pub fn push(&mut self, value: T) -> result!(bool, T) { call!(self.0.insert(value)) }
+    pub fn insert(&mut self, value: T) -> result!(bool, T) {
+        call!(self.0.insert(value))
+    }
+    pub fn push(&mut self, value: T) -> result!(bool, T) {
+        call!(self.0.insert(value))
+    }
 }
 
 impl<T, const N: usize> Default for HashSet<T, N> {

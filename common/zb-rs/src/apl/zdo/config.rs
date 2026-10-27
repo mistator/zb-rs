@@ -1,5 +1,9 @@
 use crate::apl::aps::constants::MAX_APS_FRAME_SIZE;
-use crate::apl::zdp::types::descriptors::{AvailablePowerSources, CurrentPowerMode, CurrentPowerSource, CurrentPowerSourceLevel, DescriptorCapabilities, FrequencyBands, NodeDescriptor, NodeDescriptorInfo, NodePowerDescriptor, ServerMask, UserDescriptor};
+use crate::apl::zdp::types::descriptors::{
+    AvailablePowerSources, CurrentPowerMode, CurrentPowerSource, CurrentPowerSourceLevel,
+    DescriptorCapabilities, FrequencyBands, NodeDescriptor, NodeDescriptorInfo,
+    NodePowerDescriptor, ServerMask, UserDescriptor,
+};
 use crate::nwk::constants::MAX_NWK_PAYLOAD_SIZE;
 use crate::nwk::nlme::ScanDuration;
 use byte::TryRead;
@@ -85,7 +89,7 @@ pub struct ZbConfig {
 
     pub available_power_sources: AvailablePowerSources,
     #[builder(default)]
-    pub current_power_mode: CurrentPowerMode
+    pub current_power_mode: CurrentPowerMode,
 }
 
 impl Default for ZbConfig {
@@ -150,13 +154,17 @@ impl ZbConfig {
         // TODO: make battery
     }
 
-    pub fn is_end_device(&self) -> bool { self.device_type == DeviceType::EndDevice }
+    pub fn is_end_device(&self) -> bool {
+        self.device_type == DeviceType::EndDevice
+    }
 
     pub fn is_router_or_coordinator(&self) -> bool {
         matches!(self.device_type, DeviceType::Router | DeviceType::Coordinator)
     }
 
-    pub fn is_coordinator(&self) -> bool { self.device_type == DeviceType::Coordinator }
+    pub fn is_coordinator(&self) -> bool {
+        self.device_type == DeviceType::Coordinator
+    }
 
     pub fn get_capabilities(&self) -> ZbCapabilities {
         ZbCapabilities {

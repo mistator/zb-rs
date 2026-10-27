@@ -51,7 +51,9 @@ pub enum ZclStatus {
 }
 
 impl Default for ZclStatus {
-    fn default() -> Self { ZclStatus::Success }
+    fn default() -> Self {
+        ZclStatus::Success
+    }
 }
 
 #[repr(u8)]
@@ -116,11 +118,15 @@ pub enum ZclData {
 }
 
 impl ZclData {
-    fn discriminant(&self) -> u8 { unsafe { *<*const _>::from(self).cast::<u8>() } }
+    fn discriminant(&self) -> u8 {
+        unsafe { *<*const _>::from(self).cast::<u8>() }
+    }
 }
 
 impl<'a> TryRead<'a> for ZclData {
-    fn try_read(bytes: &'a [u8], _: ()) -> byte::Result<(Self, usize)> { Self::try_read(bytes, 0) }
+    fn try_read(bytes: &'a [u8], _: ()) -> byte::Result<(Self, usize)> {
+        Self::try_read(bytes, 0)
+    }
 }
 
 impl<'a> TryWrite for &ZclData {
@@ -190,9 +196,7 @@ macro_rules! read_zcl_struct {
 impl<'a> TryRead<'a, u8> for ZclData {
     fn try_read(bytes: &'a [u8], depth: u8) -> byte::Result<(Self, usize)> {
         if depth > 15 {
-            return Err(byte::Error::BadInput {
-                err: "depth limit exceeded",
-            });
+            return Err(byte::Error::BadInput { err: "depth limit exceeded" });
         }
 
         let tag = bytes[0];
@@ -247,10 +251,8 @@ impl<'a> TryRead<'a, u8> for ZclData {
                 let len = bytes[0] as usize;
                 byte::check_len(&bytes[1..], len)?;
 
-                let value =
-                    str::from_utf8(&bytes[1..len + 1]).map_err(|_| byte::Error::BadInput {
-                        err: "invalid utf8 format",
-                    })?;
+                let value = str::from_utf8(&bytes[1..len + 1])
+                    .map_err(|_| byte::Error::BadInput { err: "invalid utf8 format" })?;
 
                 (ZclData::String(String::from(value)), len + 1)
             }
@@ -258,19 +260,14 @@ impl<'a> TryRead<'a, u8> for ZclData {
                 let len = get_u16_len(&bytes)? as usize;
                 byte::check_len(&bytes[2..], len)?;
 
-                (
-                    ZclData::LongOctetString(Vec::from(&bytes[2..len + 2])),
-                    len + 2,
-                )
+                (ZclData::LongOctetString(Vec::from(&bytes[2..len + 2])), len + 2)
             }
             0x44 => {
                 let len = get_u16_len(&bytes)? as usize;
                 byte::check_len(&bytes[2..], len)?;
 
-                let value =
-                    str::from_utf8(&bytes[2..len + 2]).map_err(|_| byte::Error::BadInput {
-                        err: "invalid utf8 format",
-                    })?;
+                let value = str::from_utf8(&bytes[2..len + 2])
+                    .map_err(|_| byte::Error::BadInput { err: "invalid utf8 format" })?;
 
                 (ZclData::String(String::from(value)), len + 2)
             }
@@ -284,10 +281,7 @@ impl<'a> TryRead<'a, u8> for ZclData {
             0xe8 => read_zcl_data_bytes!(2, u16, bytes, ZclData::ClusterId),
             0xe9 => read_zcl_data_bytes!(2, u16, bytes, ZclData::AttributeId),
             0xea => read_zcl_data_bytes!(2, u16, bytes, ZclData::BacNetOid),
-            0xf0 => (
-                ZclData::IeeeAddress(ExtendedAddress::try_read(&bytes, byte::LE)?.0),
-                4,
-            ),
+            0xf0 => (ZclData::IeeeAddress(ExtendedAddress::try_read(&bytes, byte::LE)?.0), 4),
             0xf1 => {
                 byte::check_len(&bytes, 16)?;
                 let mut key = [0u8; 16];
@@ -296,9 +290,7 @@ impl<'a> TryRead<'a, u8> for ZclData {
                 (ZclData::SecurityKey(key), 16)
             }
             _ => {
-                return Err(byte::Error::BadInput {
-                    err: "invalid data type",
-                });
+                return Err(byte::Error::BadInput { err: "invalid data type" });
             }
         };
 
@@ -311,9 +303,7 @@ impl<'a> TryWrite<u8> for &ZclData {
         self.discriminant();
 
         if depth > 15 {
-            return Err(byte::Error::BadInput {
-                err: "depth limit exceeded",
-            });
+            return Err(byte::Error::BadInput { err: "depth limit exceeded" });
         }
 
         let mut offset = 0;
@@ -452,11 +442,7 @@ impl TryRead<'_> for ZclTime {
             hour: if hours != 0xff { Some(hours) } else { None },
             minute: if minutes != 0xff { Some(minutes) } else { None },
             second: if seconds != 0xff { Some(seconds) } else { None },
-            hundredth: if hundredths != 0xff {
-                Some(hundredths)
-            } else {
-                None
-            },
+            hundredth: if hundredths != 0xff { Some(hundredths) } else { None },
         };
 
         Ok((value, 4))
@@ -470,26 +456,10 @@ impl TryWrite for &ZclTime {
         bytes.write_with(
             &mut offset,
             [
-                if self.hour.is_none() {
-                    0xff
-                } else {
-                    self.hour.unwrap()
-                },
-                if self.minute.is_none() {
-                    0xff
-                } else {
-                    self.minute.unwrap()
-                },
-                if self.second.is_none() {
-                    0xff
-                } else {
-                    self.second.unwrap()
-                },
-                if self.hundredth.is_none() {
-                    0xff
-                } else {
-                    self.hundredth.unwrap()
-                },
+                if self.hour.is_none() { 0xff } else { self.hour.unwrap() },
+                if self.minute.is_none() { 0xff } else { self.minute.unwrap() },
+                if self.second.is_none() { 0xff } else { self.second.unwrap() },
+                if self.hundredth.is_none() { 0xff } else { self.hundredth.unwrap() },
             ]
             .as_slice(),
             (),
@@ -558,26 +528,10 @@ impl TryWrite for &ZclDate {
         bytes.write_with(
             &mut offset,
             [
-                if self.year.is_none() {
-                    0xff
-                } else {
-                    self.year.unwrap()
-                },
-                if self.month.is_none() {
-                    0xff
-                } else {
-                    self.month.unwrap()
-                },
-                if self.day.is_none() {
-                    0xff
-                } else {
-                    self.day.unwrap()
-                },
-                if self.weekday.is_none() {
-                    0xff
-                } else {
-                    self.weekday.unwrap()
-                },
+                if self.year.is_none() { 0xff } else { self.year.unwrap() },
+                if self.month.is_none() { 0xff } else { self.month.unwrap() },
+                if self.day.is_none() { 0xff } else { self.day.unwrap() },
+                if self.weekday.is_none() { 0xff } else { self.weekday.unwrap() },
             ]
             .as_slice(),
             (),
@@ -598,7 +552,6 @@ impl TryWrite for ZclDate {
         <&ZclDate>::try_write(&self, bytes, ctx)
     }
 }
-
 
 fn get_u16_len(bytes: &[u8]) -> byte::Result<u16> {
     byte::check_len(bytes, 2)?;

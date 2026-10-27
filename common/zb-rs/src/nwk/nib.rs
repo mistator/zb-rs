@@ -1,20 +1,18 @@
-use core::ops::Add;
 use byte_derive::TryRead;
 use byte_derive::TryWrite;
+use core::ops::Add;
 use derive_more::{Deref, DerefMut};
 use embassy_time::Instant;
-use ieee802154::mac::beacon::BeaconOrder;
-use zb_types::common::{DeviceType, ExtendedAddress, Key, PanId};
 use zb_types::common::NwkAddress;
+use zb_types::common::{DeviceType, ExtendedAddress, Key};
 
-use smart_default::SmartDefault;
-use zb_types::{CapacityResult, HashMap, Vec};
-use zb_types::mac::Channel;
 use crate::apl::aps::types::ApsEndpoint;
 use crate::apl::zdp::types::descriptors::{NodeDescriptor, NodePowerDescriptor, SimpleDescriptor};
 use crate::nwk::commands::end_device_timeout_request::DeviceTimeout;
 use crate::nwk::commands::link_status::LinkCost;
 use crate::nwk::constants::NWK_END_DEVICE_TIMEOUT_DEFAULT;
+use smart_default::SmartDefault;
+use zb_types::{HashMap, Vec};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, TryRead, TryWrite)]
 #[repr(u8)]
@@ -92,44 +90,41 @@ pub enum NeighborRelationship {
     UnauthenticatedChild = 5,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct NwkNeighborJoinData {
-    pub extended_pan_id: ExtendedAddress,
-    pub pan_id: PanId,
-    pub logical_channel: Channel,
-    pub depth: u8,
-    pub beacon_order: BeaconOrder,
-    pub permit_joining: bool,
-    pub potential_parent: bool,
-}
-
-
-#[derive(Clone, Debug, TryRead, TryWrite, SmartDefault)]
+#[derive(Clone, Debug, bon::Builder, TryRead, TryWrite, SmartDefault)]
 pub struct NwkNeighbor {
     pub ext_addr: Option<ExtendedAddress>,
+    #[builder(default)]
     pub nwk_addr: NwkAddress,
+    #[builder(default)]
     pub device_type: DeviceType,
+    #[builder(default)]
     pub end_device_configuration: u16,
+    #[builder(default)]
     pub device_timeout: DeviceTimeout,
+    #[builder(default)]
     pub relationship: NeighborRelationship,
 
     #[byte(ignore = true)]
+    #[builder(default)]
     pub rx_on_when_idle: bool,
-    // unused
-    // timeout_counter: u32,
     #[byte(ignore = true)]
+    #[builder(default)]
     pub transmit_failure: u8,
     #[byte(ignore = true)]
+    #[builder(default)]
     pub incoming_cost: LinkCost,
     #[byte(ignore = true)]
+    #[builder(default)]
     pub outgoing_cost: LinkCost,
     #[default(Instant::now())]
     #[byte(ignore = true, default = Instant::now())]
+    #[builder(default = Instant::now())]
     pub expiration: Instant,
     // optional
     // incoming_beacon_timestamp: u8,
     // beacon_transmission_time: u8,
     #[byte(ignore = true)]
+    #[builder(default)]
     pub keepalive_received: bool,
     // we only support 1 MAC interface currently
     // mac_interface_index: u8,
@@ -141,9 +136,8 @@ pub struct NwkNeighbor {
     #[byte(ignore = true)]
     pub power_descriptor: Option<NodePowerDescriptor>,
     #[byte(ignore = true)]
+    #[builder(default)]
     pub simple_descriptors: HashMap<ApsEndpoint, SimpleDescriptor, 32>,
-    #[byte(ignore = true)]
-    pub join_data: Option<NwkNeighborJoinData>,
 }
 
 pub struct NewNwkNeighbour {
@@ -189,21 +183,23 @@ pub const NEIGHBOR_TABLE_MAX_ENTRIES: usize = 32;
 #[derive(Clone, Debug, Default, TryRead, TryWrite)]
 pub struct NeighborTable {
     pub parent: NwkNeighbor,
-    pub children: Vec<NwkNeighbor, NEIGHBOR_TABLE_MAX_ENTRIES>
+    pub neighbors: Vec<NwkNeighbor, NEIGHBOR_TABLE_MAX_ENTRIES>,
 }
 
 impl NeighborTable {
-    pub fn new(parent: NwkNeighbor) -> Self {
-        Self {
-            parent,
-            children: Vec::new(),
-        }
+    pub fn new(
+        parent: NwkNeighbor,
+        neighbors: Vec<NwkNeighbor, NEIGHBOR_TABLE_MAX_ENTRIES>,
+    ) -> Self {
+        Self { parent, neighbors }
     }
 
-    pub fn cleanup(&mut self) { self.children.retain(|nb| nb.expiration > Instant::now()); }
+    pub fn cleanup(&mut self) {
+        self.neighbors.retain(|nb| nb.expiration > Instant::now());
+    }
 
     pub fn find_by_ext_addr(&self, addr: ExtendedAddress) -> Option<&NwkNeighbor> {
-        self.children.iter().find(|nb| nb.ext_addr == Some(addr))
+        self.neighbors.iter().find(|nb| nb.ext_addr == Some(addr))
     }
 
     pub fn find_by_ext_addr_and_type(
@@ -211,9 +207,7 @@ impl NeighborTable {
         addr: ExtendedAddress,
         type_: DeviceType,
     ) -> Option<&NwkNeighbor> {
-        self.children
-            .iter()
-            .find(|nb| nb.ext_addr == Some(addr) && type_ == nb.device_type)
+        self.neighbors.iter().find(|nb| nb.ext_addr == Some(addr) && type_ == nb.device_type)
     }
 
     pub fn find_by_ext_addr_and_type_mut(
@@ -221,17 +215,15 @@ impl NeighborTable {
         addr: ExtendedAddress,
         type_: DeviceType,
     ) -> Option<&mut NwkNeighbor> {
-        self.children
-            .iter_mut()
-            .find(|nb| nb.ext_addr == Some(addr) && type_ == nb.device_type)
+        self.neighbors.iter_mut().find(|nb| nb.ext_addr == Some(addr) && type_ == nb.device_type)
     }
 
     pub fn find_by_ext_addr_mut(&mut self, addr: ExtendedAddress) -> Option<&mut NwkNeighbor> {
-        self.children.iter_mut().find(|nb| nb.ext_addr == Some(addr))
+        self.neighbors.iter_mut().find(|nb| nb.ext_addr == Some(addr))
     }
 
     pub fn find_by_short_addr(&self, addr: NwkAddress) -> Option<&NwkNeighbor> {
-        self.children.iter().find(|nb| nb.nwk_addr == addr)
+        self.neighbors.iter().find(|nb| nb.nwk_addr == addr)
     }
 
     pub fn find_by_short_addr_and_device_type(
@@ -239,13 +231,11 @@ impl NeighborTable {
         addr: NwkAddress,
         device_type: DeviceType,
     ) -> Option<&NwkNeighbor> {
-        self.children
-            .iter()
-            .find(|nb| nb.nwk_addr == addr && nb.device_type == device_type)
+        self.neighbors.iter().find(|nb| nb.nwk_addr == addr && nb.device_type == device_type)
     }
 
     pub fn find_by_short_addr_mut(&mut self, addr: NwkAddress) -> Option<&mut NwkNeighbor> {
-        self.children.iter_mut().find(|nb| nb.nwk_addr == addr)
+        self.neighbors.iter_mut().find(|nb| nb.nwk_addr == addr)
     }
 }
 
@@ -266,9 +256,7 @@ impl AddressMap {
 }
 
 #[derive(Clone, Debug, Default, Deref, DerefMut, TryRead, TryWrite)]
-pub struct NetworkSecurityMaterialDescriptorSet(
-    Vec<NetworkSecurityMaterialDescriptor, 4>,
-);
+pub struct NetworkSecurityMaterialDescriptorSet(Vec<NetworkSecurityMaterialDescriptor, 4>);
 
 #[derive(Clone, Default, Debug, TryRead, TryWrite)]
 pub struct NetworkSecurityMaterialDescriptor {

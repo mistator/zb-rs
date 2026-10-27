@@ -1,4 +1,7 @@
-use core::cmp::min;
+use crate::common::security::SecurityError;
+use crate::common::security::SecurityError::CcmError;
+use crate::common::security::frame::AuxFrameHeader;
+use crate::common::security::frame::SecurityLevel;
 use aead::AeadInPlace;
 use aead::generic_array::ArrayLength;
 use aes::Aes128;
@@ -13,16 +16,13 @@ use byte::ctx::Endian;
 use ccm::Ccm;
 use ccm::TagSize;
 use ccm::aead::generic_array::GenericArray;
-use ccm::consts::U13;
-use ccm::consts::U16;
 use ccm::consts::U4;
 use ccm::consts::U8;
-use ctr::cipher::StreamCipher;
+use ccm::consts::U13;
+use ccm::consts::U16;
+use core::cmp::min;
 use ctr::Ctr32BE;
-use crate::common::security::SecurityError;
-use crate::common::security::SecurityError::CcmError;
-use crate::common::security::frame::AuxFrameHeader;
-use crate::common::security::frame::SecurityLevel;
+use ctr::cipher::StreamCipher;
 use zb_types::common::Key;
 
 pub struct Aes128Mmo {
@@ -34,9 +34,7 @@ impl Aes128Mmo {
     const PADDING_THRESHOLD: usize = 2usize.pow(Self::BLOCK_SIZE as u32);
 
     pub fn new() -> Self {
-        Self {
-            state: [0u8; Self::BLOCK_SIZE],
-        }
+        Self { state: [0u8; Self::BLOCK_SIZE] }
     }
 
     pub fn initialize(iv: &[u8]) -> Self {
@@ -97,7 +95,9 @@ impl Aes128Mmo {
         Ok(())
     }
 
-    pub fn finalize(self) -> [u8; 16] { self.state }
+    pub fn finalize(self) -> [u8; 16] {
+        self.state
+    }
 
     pub fn digest(data: &[u8]) -> Result<[u8; Self::BLOCK_SIZE], SecurityError> {
         Self::digest_impl(data.iter().copied())
@@ -119,7 +119,9 @@ impl Aes128Mmo {
 }
 
 impl Default for Aes128Mmo {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// HMAC implementation using AES-MMO hash function
@@ -189,12 +191,10 @@ impl CcmZigbee {
 
         let tag: GenericArray<u8, T> = GenericArray::clone_from_slice(tag);
         let cipher = Aes128Ccm::<T>::new(self.key.as_array().into());
-        cipher
-            .decrypt_in_place_detached(&nonce, aad, ciphertext, &tag)
-            .map_err(|err| {
-                log::warn!("[CCM-DECRYPT] error decrypting frame: {:?}", err);
-                CcmError(err)
-            })
+        cipher.decrypt_in_place_detached(&nonce, aad, ciphertext, &tag).map_err(|err| {
+            log::warn!("[CCM-DECRYPT] error decrypting frame: {:?}", err);
+            CcmError(err)
+        })
     }
 
     fn ccm_encrypt<T: ArrayLength<u8> + TagSize>(
@@ -240,7 +240,7 @@ impl CcmZigbee {
                 _ => {
                     log::warn!("[CCM-DECRYPT] invalid tag length: {:?}", tag.len());
                     Err(CcmError(ccm::Error))
-                },
+                }
             }
         }
     }
@@ -303,12 +303,7 @@ pub fn write_and_encrypt_in_place(
     let len = tag_offset + mic_len;
 
     let ccm = CcmZigbee { key };
-    ccm.encrypt_in_place(
-        security_level,
-        aad,
-        &mut payload[..len - payload_offset],
-        &nonce,
-    )?;
+    ccm.encrypt_in_place(security_level, aad, &mut payload[..len - payload_offset], &nonce)?;
 
     // overwrite sec level in aux header with 000
     frame_buffer[aux_hdr_offset] &= 0b1111_1000;
@@ -326,9 +321,8 @@ mod tests {
             0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
             0xce, 0xcf,
         ]);
-        let nonce: [u8; 13] = [
-            0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x03, 0x02, 0x01, 0x00, 0x06,
-        ];
+        let nonce: [u8; 13] =
+            [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x03, 0x02, 0x01, 0x00, 0x06];
         let mut lc: [u8; 23] = [
             0x1a, 0x55, 0xa3, 0x6a, 0xbb, 0x6c, 0x61, 0x0d, 0x06, 0x6b, 0x33, 0x75, 0x64, 0x9c,
             0xef, 0x10, 0xd4, 0x66, 0x4e, 0xca, 0xd8, 0x54, 0xa8,
@@ -354,9 +348,8 @@ mod tests {
             0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd,
             0xce, 0xcf,
         ]);
-        let nonce: [u8; 13] = [
-            0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x03, 0x02, 0x01, 0x00, 0x06,
-        ];
+        let nonce: [u8; 13] =
+            [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0x03, 0x02, 0x01, 0x00, 0x06];
         let mut lc: [u8; 23] = [
             0x1a, 0x55, 0xa3, 0x6a, 0xbb, 0x6c, 0x61, 0x0d, 0x06, 0x6b, 0x33, 0x75, 0x64, 0x9c,
             0xef, 0x10, 0xd4, 0x66, 0x4e, 0xca, 0xd8, 0x54, 0xa8,

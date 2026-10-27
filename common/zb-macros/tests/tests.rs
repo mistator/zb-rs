@@ -3,7 +3,7 @@ mod tests {
     use byte::{TryRead, TryWrite};
     use byte_derive::{TryRead, TryWrite};
     use std::fmt::Debug;
-    use zb_macros::{BitStruct};
+    use zb_macros::BitStruct;
 
     fn test_try_write<T: TryWrite<Endian>>(obj: T, exp_bytes: &[u8], ctx: Endian) {
         let mut bytes = [0u8; 1024];
@@ -52,17 +52,21 @@ mod tests {
             pub n: u8,
         }
 
-        test_write_and_read(Test {
-            b1: true,
-            b2: false,
-            b3: false,
-            b4: false,
-            b5: false,
-            b6: false,
-            b7: false,
-            b8: false,
-            n: 13,
-        }, &[1, 13], byte::LE);
+        test_write_and_read(
+            Test {
+                b1: true,
+                b2: false,
+                b3: false,
+                b4: false,
+                b5: false,
+                b6: false,
+                b7: false,
+                b8: false,
+                n: 13,
+            },
+            &[1, 13],
+            byte::LE,
+        );
     }
 
     #[test]
@@ -77,11 +81,7 @@ mod tests {
             pub c: bool,
         }
 
-        test_write_and_read(Test {
-            a: true,
-            b: false,
-            c: true
-        }, &[0b0100_1000], byte::LE);
+        test_write_and_read(Test { a: true, b: false, c: true }, &[0b0100_1000], byte::LE);
     }
 
     #[test]
@@ -103,11 +103,6 @@ mod tests {
             pub c: bool,
         }
 
-        test_write_and_read(Test {
-            a: E::C,
-            b: true,
-            c: false
-        }, &[0b0000_1101], byte::LE);
+        test_write_and_read(Test { a: E::C, b: true, c: false }, &[0b0000_1101], byte::LE);
     }
 }
-

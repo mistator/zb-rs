@@ -18,8 +18,10 @@ pub struct Tolerance(u16);
     cluster_type = ClusterType::Server,
 )]
 pub struct Temperature {
-    #[R] pub measured_value: MeasuredValue,
+    #[R]
+    pub measured_value: MeasuredValue,
     pub min_measured_value: MinMeasuredValue,
     pub max_measured_value: MaxMeasuredValue,
-    #[R] pub tolerance: Tolerance,
+    #[R]
+    pub tolerance: Tolerance,
 }

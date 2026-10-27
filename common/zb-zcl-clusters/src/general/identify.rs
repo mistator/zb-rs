@@ -1,10 +1,10 @@
-use zigbee::zcl::cluster::types::Attribute;
 use byte::BytesExt;
 use byte::TryRead;
+use byte_derive::{TryRead, TryWrite};
 use core::fmt::Debug;
 use zb_macros::{zcl_attr, zcl_cluster};
+use zigbee::zcl::cluster::types::Attribute;
 use zigbee::zcl::cluster::types::{AttributeAccess, ClusterType};
-use byte_derive::{TryRead, TryWrite};
 use zigbee::zcl::frame::{SpecificZclCommand, ZclFrameCommand};
 
 #[zcl_attr(identifier = 0x0000, access = AttributeAccess::READ_WRITE)]
@@ -67,9 +67,7 @@ impl TryRead<'_, u8> for IdentifyZclCommand {
 
                 Ok((IdentifyZclCommand::TriggerEffect(effect, variant), 2))
             }
-            _ => Err(byte::Error::BadInput {
-                err: "invalid command id for Identify cluster",
-            }),
+            _ => Err(byte::Error::BadInput { err: "invalid command id for Identify cluster" }),
         }
     }
 }
@@ -111,4 +109,3 @@ fn identify_custom_command_handler<H: IdentifyClusterHandler>(
 fn identify_update_handler<H: IdentifyClusterHandler>(this: &mut IdentifyCluster<H>) -> () {
     this.identify_time.value = this.identify_time.value.saturating_sub(1);
 }
-

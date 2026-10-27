@@ -1,6 +1,6 @@
-use byte::TryRead;
 use alloc::string::String;
-use zb_macros::{zcl_attr, zcl_cluster, BitStruct};
+use byte::TryRead;
+use zb_macros::{BitStruct, zcl_attr, zcl_cluster};
 use zigbee::zcl::cluster::types::{AttributeAccess, ClusterType};
 use zigbee::zcl::frame::{SpecificZclCommand, ZclFrameCommand};
 
@@ -18,7 +18,9 @@ pub enum PowerSources {
 }
 
 impl From<PowerSources> for u8 {
-    fn from(value: PowerSources) -> Self { value as u8 }
+    fn from(value: PowerSources) -> Self {
+        value as u8
+    }
 }
 
 impl TryFrom<u8> for PowerSources {
@@ -152,7 +154,9 @@ pub enum PhysicalEnvironments {
 }
 
 impl From<PhysicalEnvironments> for u8 {
-    fn from(value: PhysicalEnvironments) -> Self { value as u8 }
+    fn from(value: PhysicalEnvironments) -> Self {
+        value as u8
+    }
 }
 
 impl TryFrom<u8> for PhysicalEnvironments {
@@ -286,20 +290,34 @@ pub struct DisableLocalConfigMask {
     pub device_configuration_disabled: bool,
 }
 
-#[zcl_attr(identifier = 0x0000, default = 0x02)] pub struct ZclVersion(u8);
-#[zcl_attr(identifier = 0x0001)] pub struct ApplicationVersion(u8);
-#[zcl_attr(identifier = 0x0002)] pub struct StackVersion(u8);
-#[zcl_attr(identifier = 0x0003)] pub struct HwVersion(u8);
-#[zcl_attr(identifier = 0x0004)] pub struct ManufacturerName(String);
-#[zcl_attr(identifier = 0x0005)] pub struct ModelIdentifier(String);
-#[zcl_attr(identifier = 0x0006)] pub struct DateCode(String);
-#[zcl_attr(identifier = 0x0007, variant = ZclData::Enum8)] pub struct PowerSource(PowerSources);
-#[zcl_attr(identifier = 0x0010)] pub struct LocationDescription(String);
-#[zcl_attr(identifier = 0x0011, variant = ZclData::Enum8)] pub struct PhysicalEnvironment(PhysicalEnvironments);
-#[zcl_attr(identifier = 0x0012, access = AttributeAccess::READ_WRITE, default = true)] pub struct DeviceEnabled(bool);
-#[zcl_attr(identifier = 0x0013, access = AttributeAccess::READ_WRITE, variant = ZclData::Bitmap8)] pub struct Alarm(AlarmMask);
-#[zcl_attr(identifier = 0x0014, access = AttributeAccess::READ_WRITE, variant = ZclData::Bitmap8)] pub struct DisableLocalConfig(DisableLocalConfigMask);
-#[zcl_attr(identifier = 0x0015)] pub struct SwBuildId(String);
+#[zcl_attr(identifier = 0x0000, default = 0x02)]
+pub struct ZclVersion(u8);
+#[zcl_attr(identifier = 0x0001)]
+pub struct ApplicationVersion(u8);
+#[zcl_attr(identifier = 0x0002)]
+pub struct StackVersion(u8);
+#[zcl_attr(identifier = 0x0003)]
+pub struct HwVersion(u8);
+#[zcl_attr(identifier = 0x0004)]
+pub struct ManufacturerName(String);
+#[zcl_attr(identifier = 0x0005)]
+pub struct ModelIdentifier(String);
+#[zcl_attr(identifier = 0x0006)]
+pub struct DateCode(String);
+#[zcl_attr(identifier = 0x0007, variant = ZclData::Enum8)]
+pub struct PowerSource(PowerSources);
+#[zcl_attr(identifier = 0x0010)]
+pub struct LocationDescription(String);
+#[zcl_attr(identifier = 0x0011, variant = ZclData::Enum8)]
+pub struct PhysicalEnvironment(PhysicalEnvironments);
+#[zcl_attr(identifier = 0x0012, access = AttributeAccess::READ_WRITE, default = true)]
+pub struct DeviceEnabled(bool);
+#[zcl_attr(identifier = 0x0013, access = AttributeAccess::READ_WRITE, variant = ZclData::Bitmap8)]
+pub struct Alarm(AlarmMask);
+#[zcl_attr(identifier = 0x0014, access = AttributeAccess::READ_WRITE, variant = ZclData::Bitmap8)]
+pub struct DisableLocalConfig(DisableLocalConfigMask);
+#[zcl_attr(identifier = 0x0015)]
+pub struct SwBuildId(String);
 
 #[zcl_cluster(
     identifier = 0x0000,
@@ -375,9 +393,7 @@ impl TryRead<'_, u8> for BasicZclCommand {
     fn try_read(_: &[u8], cmd_id: u8) -> byte::Result<(Self, usize)> {
         match cmd_id {
             0x0 => Ok((BasicZclCommand::ResetToFactoryDefaults, 0)),
-            _ => Err(byte::Error::BadInput {
-                err: "invalid command id for Basic cluster",
-            }),
+            _ => Err(byte::Error::BadInput { err: "invalid command id for Basic cluster" }),
         }
     }
 }

@@ -9,7 +9,7 @@ use esp_radio::ieee802154::{CcaMode, Config};
 use zb_hal::{Ieee802154Driver, NwkMac};
 use zb_types::Vec;
 use zb_types::common::{ExtendedAddress, NwkAddress, PanId};
-use zb_types::mac::{Channel, ChannelMask, MacFrame};
+use zb_types::mac::{Channel, ChannelMask, MacFrame, ReceivedMacFrame};
 
 static TX_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static RX_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
@@ -151,7 +151,7 @@ impl Ieee802154Driver for Esp32Driver {
         while self.poll().is_some() {}
     }
 
-    fn poll(&mut self) -> Option<MacFrame> {
+    fn poll(&mut self) -> Option<ReceivedMacFrame> {
         unsafe { self.driver.lock_mut(|driver| {
             driver
                 .received()?
@@ -160,16 +160,21 @@ impl Ieee802154Driver for Esp32Driver {
                     err
                 })
                 .ok()
-                .map(|rf| MacFrame {
-                    header: rf.frame.header,
-                    content: rf.frame.content,
-                    payload: Vec::from_iter(rf.frame.payload),
-                    footer: rf.frame.footer,
+                .map(|rf| ReceivedMacFrame {
+                    frame: MacFrame {
+                        header: rf.frame.header,
+                        content: rf.frame.content,
+                        payload: Vec::from_iter(rf.frame.payload),
+                        footer: rf.frame.footer,
+                    },
+                    lqi: rf.lqi,
+                    rssi: rf.rssi,
+                    channel: Channel::from(rf.channel)
                 })
         }) }
     }
 
-    async fn wait_frame(&mut self) -> MacFrame {
+    async fn wait_frame(&mut self) -> ReceivedMacFrame {
         loop {
             if let Some(result) = self.poll() {
                 return result;

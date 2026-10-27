@@ -1,14 +1,10 @@
 use core::ops::Deref;
-use ieee802154::mac::beacon::PendingAddress;
 use ieee802154::mac::beacon::SuperframeSpecification;
 use ieee802154::mac::command::AssociationStatus;
 use thiserror::Error;
 use zb_types::Vec;
 
-
-use crate::mac::constants::A_MAX_BEACON_PAYLOAD_LENGTH;
 use crate::mac::constants::MAX_PAN_DESCRIPTOR_SIZE;
-use crate::nwk::nlme::ZigbeeBeacon;
 use zb_types::common::Address;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
@@ -66,7 +62,7 @@ pub enum PollError {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum MlmeAssociationError {
+pub enum AssociationError {
     ChannelAccessFailure,
     NoAck,
     NoData,
@@ -95,11 +91,15 @@ pub struct RawNwkFrame(zb_types::Vec<u8, A_MAX_MAC_PAYLOAD_SIZE>);
 impl Deref for RawNwkFrame {
     type Target = zb_types::Vec<u8, A_MAX_MAC_PAYLOAD_SIZE>;
 
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 impl RawNwkFrame {
-    pub fn is_secured(&self) -> bool { (*self.get(1).unwrap_or_else(|| &0u8) & 0b0100_0000) > 0 }
+    pub fn is_secured(&self) -> bool {
+        (*self.get(1).unwrap_or_else(|| &0u8) & 0b0100_0000) > 0
+    }
 
     pub fn is_data_frame(&self) -> bool {
         (*self.get(0).unwrap_or_else(|| &0u8) & 0b1100_0000) == 0
@@ -161,18 +161,9 @@ pub enum ScanError {
     InvalidParameter(&'static str),
 }
 
-#[derive(Debug)]
-pub struct BeaconData {
-    pub sequence_number: u8,
-    pub pan_descriptor: PanDescriptor,
-    pub pending_address_spec: PendingAddress,
-    pub payload: Vec<u8, A_MAX_BEACON_PAYLOAD_LENGTH>,
-}
-
 pub type PanDescriptorList = Vec<PanDescriptor, MAX_PAN_DESCRIPTOR_SIZE>;
 
-#[non_exhaustive]
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct PanDescriptor {
     pub channel: Channel,
     pub coord_pan_id: PanId,
@@ -184,7 +175,7 @@ pub struct PanDescriptor {
     pub security_use: bool,
     // pub ACL_Entry: u8,
     // pub security_failure: bool
-    pub zigbee_beacon: ZigbeeBeacon,
+    pub payload: Vec<u8, A_MAX_MAC_PAYLOAD_SIZE>,
 }
 
 #[derive(Debug)]

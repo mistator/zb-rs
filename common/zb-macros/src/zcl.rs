@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
-use syn::{Attribute, Expr, ExprTuple, Field, Fields, FieldsNamed, FieldsUnnamed, GenericParam, Generics, ItemStruct, LitInt, Meta, MetaNameValue, Path, PathSegment, Token, Type, TypePath, Visibility};
+use syn::{
+    Attribute, Expr, ExprTuple, Field, Fields, FieldsNamed, FieldsUnnamed, GenericParam, Generics,
+    ItemStruct, LitInt, Meta, MetaNameValue, Path, PathSegment, Token, Type, TypePath, Visibility,
+};
 
 pub struct ZclAttrParams {
     pub identifier: LitInt,
@@ -14,55 +17,56 @@ pub struct ZclAttrParams {
     pub default: Option<Expr>,
     pub reported: Option<(Expr, Expr, Expr)>,
     pub range: Option<(Expr, Expr)>,
-    pub crate_name: Option<PathSegment>
+    pub crate_name: Option<PathSegment>,
 }
 
 impl ZclAttrParams {
-    const KEYS: [&'static str; 7] = ["identifier", "variant", "access", "default", "reported", "range", "crate"];
+    const KEYS: [&'static str; 7] =
+        ["identifier", "variant", "access", "default", "reported", "range", "crate"];
 }
 
 impl Parse for ZclAttrParams {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let items = Punctuated::<MetaNameValue, Token![,]>::parse_terminated(input)?;
 
-        let items = items.iter()
+        let items = items
+            .iter()
             .map(|item| {
-                let key = item.path
+                let key = item
+                    .path
                     .get_ident()
                     .ok_or(syn::Error::new(item.span(), "invalid key"))?
                     .to_string();
                 if !ZclAttrParams::KEYS.contains(&key.as_str()) {
-                    return Err(syn::Error::new(item.span(), "invalid key"))
+                    return Err(syn::Error::new(item.span(), "invalid key"));
                 }
                 Ok((key, item.value.clone()))
             })
             .collect::<syn::Result<Vec<(String, Expr)>>>()?;
         let items = HashMap::<String, Expr>::from_iter(items);
 
-        let identifier = items.get("identifier")
-            .ok_or(syn::Error::new(input.span(), "missing identifier"))?;
+        let identifier =
+            items.get("identifier").ok_or(syn::Error::new(input.span(), "missing identifier"))?;
         let identifier = as_lit_int(identifier)?;
 
-        let variant = items.get("variant")
-            .map(|item| as_path(item)
-                .unwrap()
-                .segments
-                .last()
-                .unwrap()
-                .clone()
-            );
+        let variant = items
+            .get("variant")
+            .map(|item| as_path(item).unwrap().segments.last().unwrap().clone());
 
         let reported = match items.get("reported") {
             None => None,
             Some(Expr::Tuple(ExprTuple { elems, .. })) => {
                 if elems.len() != 3 {
-                    return Err(syn::Error::new(input.span(), "invalid format for reported attribute"))
+                    return Err(syn::Error::new(
+                        input.span(),
+                        "invalid format for reported attribute",
+                    ));
                 } else {
                     Some((elems[0].clone(), elems[1].clone(), elems[2].clone()))
                 }
             }
             _ => {
-                return Err(syn::Error::new(input.span(), "invalid format for reported attribute"))
+                return Err(syn::Error::new(input.span(), "invalid format for reported attribute"));
             }
         };
 
@@ -70,25 +74,19 @@ impl Parse for ZclAttrParams {
             None => None,
             Some(Expr::Tuple(ExprTuple { elems, .. })) => {
                 if elems.len() != 2 {
-                    return Err(syn::Error::new(input.span(), "invalid format for range attribute"))
+                    return Err(syn::Error::new(
+                        input.span(),
+                        "invalid format for range attribute",
+                    ));
                 } else {
                     Some((elems[0].clone(), elems[1].clone()))
                 }
             }
-            _ => {
-                return Err(syn::Error::new(input.span(), "invalid format for range attribute"))
-            }
+            _ => return Err(syn::Error::new(input.span(), "invalid format for range attribute")),
         };
 
-        let crate_name = items.get("crate")
-            .map(|item| as_path(item)
-                .unwrap()
-                .segments
-                .last()
-                .unwrap()
-                .clone()
-            );
-
+        let crate_name =
+            items.get("crate").map(|item| as_path(item).unwrap().segments.last().unwrap().clone());
 
         Ok(ZclAttrParams {
             identifier,
@@ -116,11 +114,11 @@ impl Parse for ZclAttrStructDef {
         let field = match strct.fields {
             Fields::Unnamed(FieldsUnnamed { ref unnamed, .. }) => {
                 if unnamed.len() != 1 {
-                    return Err(syn::Error::new(strct.fields.span(), "invalid struct definition"))
+                    return Err(syn::Error::new(strct.fields.span(), "invalid struct definition"));
                 }
                 unnamed.first().unwrap().clone()
             }
-            _ => return Err(syn::Error::new(strct.fields.span(), "invalid struct definition"))
+            _ => return Err(syn::Error::new(strct.fields.span(), "invalid struct definition")),
         };
 
         Ok(Self {
@@ -128,7 +126,7 @@ impl Parse for ZclAttrStructDef {
             vis: strct.vis,
             ident: strct.ident,
             generics: strct.generics,
-            field
+            field,
         })
     }
 }
@@ -195,7 +193,7 @@ pub fn get_zcl_identifier(variant: String) -> LitInt {
         "BacNetOid" => 0xea,
         "IeeeAddress" => 0xf0,
         "SecurityKey" => 0xf1,
-        _ => panic!("invalid ZclVariant")
+        _ => panic!("invalid ZclVariant"),
     };
 
     LitInt::new(id.to_string().as_str(), variant.span())
@@ -204,7 +202,8 @@ pub fn get_zcl_identifier(variant: String) -> LitInt {
 impl ToTokens for ZclAttr {
     #[allow(non_snake_case)]
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        let ZclAttrParams { identifier, variant, access, default, reported, range, crate_name } = &self.params;
+        let ZclAttrParams { identifier, variant, access, default, reported, range, crate_name } =
+            &self.params;
         let ZclAttrStructDef { attrs, vis, ident, generics, field } = &self.struct_def;
         let Field { attrs: field_attrs, ty, .. } = &field;
 
@@ -225,7 +224,7 @@ impl ToTokens for ZclAttr {
                         "f32" => "Float",
                         "f64" => "Double",
                         "String" => "String",
-                        _ => panic!("invalid type")
+                        _ => panic!("invalid type"),
                     };
 
                     Ident::new(variant, Span::call_site())
@@ -245,7 +244,7 @@ impl ToTokens for ZclAttr {
 
         let crate_name = match crate_name {
             None => quote!(zigbee),
-            Some(segment) => quote!(#segment)
+            Some(segment) => quote!(#segment),
         };
 
         let base_path = quote!(#crate_name::zcl);
@@ -255,14 +254,15 @@ impl ToTokens for ZclAttr {
         let Attribute = quote!(#base_path::cluster::types::Attribute);
         let ReportedAttribute = quote!(#base_path::cluster::types::ReportedAttribute);
         let AttributeAccess = quote!(#base_path::cluster::types::AttributeAccess);
-        let ReportedAttributeIntervalsConfig = quote!(#base_path::cluster::types::ReportedAttributeIntervalsConfig);
+        let ReportedAttributeIntervalsConfig =
+            quote!(#base_path::cluster::types::ReportedAttributeIntervalsConfig);
         let ZclData = quote!(#base_path::types::ZclData);
         let ZclVariant = quote!(#ZclData::#variant);
         let ZclStatus = quote!(#base_path::types::ZclStatus);
 
         let access = match access {
             None => quote!(#AttributeAccess::READ_ONLY),
-            Some(path) => quote!(#path)
+            Some(path) => quote!(#path),
         };
 
         let report_config = match reported {
@@ -271,7 +271,7 @@ impl ToTokens for ZclAttr {
                 Some(#ReportedAttributeIntervalsConfig::<#ty>::new(
                     (#min, #max), #step
                 ))
-            }
+            },
         };
 
         let range_block = match range {
@@ -282,7 +282,7 @@ impl ToTokens for ZclAttr {
                 } else {
                     Err(#ZclStatus::InvalidValue)
                 }
-            }
+            },
         };
 
         let reported_read_bytes_block = match reported {
@@ -295,9 +295,8 @@ impl ToTokens for ZclAttr {
                 let _ = config.set_values(min, max, #step);
 
                 let intervals = Some(config);
-            }
+            },
         };
-
 
         tokens.extend(quote! {
             #(#attrs)*
@@ -495,51 +494,52 @@ pub struct ZclClusterParams {
 }
 
 impl ZclClusterParams {
-    const KEYS: [&'static str; 6] = ["identifier", "cluster_type", "cmd_handler", "update_handler", "frequency", "crate"];
+    const KEYS: [&'static str; 6] =
+        ["identifier", "cluster_type", "cmd_handler", "update_handler", "frequency", "crate"];
 }
 
 impl Parse for ZclClusterParams {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let items = Punctuated::<MetaNameValue, Token![,]>::parse_terminated(input)?;
 
-        let items = items.iter()
+        let items = items
+            .iter()
             .map(|item| {
-                let key = item.path
+                let key = item
+                    .path
                     .get_ident()
                     .ok_or(syn::Error::new(item.span(), "invalid key"))?
                     .to_string();
                 if !ZclClusterParams::KEYS.contains(&key.as_str()) {
-                    return Err(syn::Error::new(item.span(), "invalid key"))
+                    return Err(syn::Error::new(item.span(), "invalid key"));
                 }
                 Ok((key, item.value.clone()))
             })
             .collect::<syn::Result<Vec<(String, Expr)>>>()?;
         let items = HashMap::<String, Expr>::from_iter(items);
 
-        let identifier = items.get("identifier")
-            .ok_or(syn::Error::new(input.span(), "missing identifier"))?;
+        let identifier =
+            items.get("identifier").ok_or(syn::Error::new(input.span(), "missing identifier"))?;
         let identifier = as_lit_int(identifier)?;
 
-        let cluster_type = as_path(items.get("cluster_type")
-            .ok_or(syn::Error::new(input.span(), "missing cluster type"))?)?;
+        let cluster_type = as_path(
+            items
+                .get("cluster_type")
+                .ok_or(syn::Error::new(input.span(), "missing cluster type"))?,
+        )?;
 
-        let crate_name = items.get("crate")
-            .map(|item| as_path(item)
-                .unwrap()
-                .segments
-                .last()
-                .unwrap()
-                .clone()
-            );
+        let crate_name =
+            items.get("crate").map(|item| as_path(item).unwrap().segments.last().unwrap().clone());
 
         Ok(ZclClusterParams {
             identifier,
             cluster_type,
             cmd_handler: items.get("cmd_handler").cloned(),
             update_handler: items.get("update_handler").cloned(),
-            frequency: items.get("frequency")
+            frequency: items
+                .get("frequency")
                 .map(|item| as_lit_int(item).expect("invalid frequency value")),
-            crate_name
+            crate_name,
         })
     }
 }
@@ -550,16 +550,18 @@ pub struct ZclClusterStructDef {
     pub ident: Ident,
     pub generics: Generics,
     pub fields: Vec<Field>,
-    pub reportable_fields: Vec<Field>
+    pub reportable_fields: Vec<Field>,
 }
 
 impl Parse for ZclClusterStructDef {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         fn has_r_attr(field: &Field) -> bool {
-            field.attrs.iter().any(|attr| if let Meta::Path(ref path) = attr.meta {
-                path.get_ident().is_some_and(|item| item.to_string().as_str() == "R")
-            } else {
-                false
+            field.attrs.iter().any(|attr| {
+                if let Meta::Path(ref path) = attr.meta {
+                    path.get_ident().is_some_and(|item| item.to_string().as_str() == "R")
+                } else {
+                    false
+                }
             })
         }
 
@@ -571,16 +573,19 @@ impl Parse for ZclClusterStructDef {
         if let Fields::Named(FieldsNamed { named, .. }) = strct.fields {
             for mut field in named {
                 if has_r_attr(&field) {
-                    field.attrs.retain(|item| item.path().get_ident().is_none_or(|ident| ident.to_string().as_str() != "R"));
+                    field.attrs.retain(|item| {
+                        item.path()
+                            .get_ident()
+                            .is_none_or(|ident| ident.to_string().as_str() != "R")
+                    });
                     reportable_fields.push(field.clone());
                 }
 
                 fields.push(field.clone());
             }
         } else {
-            return Err(syn::Error::new(strct.fields.span(), "invalid struct definition"))
+            return Err(syn::Error::new(strct.fields.span(), "invalid struct definition"));
         }
-
 
         Ok(Self {
             attrs: strct.attrs,
@@ -601,10 +606,20 @@ pub struct ZclCluster {
 impl ToTokens for ZclCluster {
     #[allow(non_snake_case)]
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        let ZclClusterParams { identifier, cluster_type, cmd_handler, update_handler, frequency, crate_name } = &self.params;
-        let ZclClusterStructDef { attrs, vis, ident, generics, fields, reportable_fields } = &self.struct_def;
+        let ZclClusterParams {
+            identifier,
+            cluster_type,
+            cmd_handler,
+            update_handler,
+            frequency,
+            crate_name,
+        } = &self.params;
+        let ZclClusterStructDef { attrs, vis, ident, generics, fields, reportable_fields } =
+            &self.struct_def;
 
-        let generic_idents = generics.params.clone()
+        let generic_idents = generics
+            .params
+            .clone()
             .iter()
             .map(|param| match param {
                 GenericParam::Lifetime(lifetime) => lifetime.lifetime.ident.clone(),
@@ -618,11 +633,15 @@ impl ToTokens for ZclCluster {
             Some(segment) => quote!(#segment),
         };
 
-        let ctx_type = generics.params.iter()
-            .filter_map(|item| if let GenericParam::Type(type_param) = item {
-                Some(type_param.clone())
-            } else {
-                None
+        let ctx_type = generics
+            .params
+            .iter()
+            .filter_map(|item| {
+                if let GenericParam::Type(type_param) = item {
+                    Some(type_param.clone())
+                } else {
+                    None
+                }
             })
             .collect::<Vec<_>>()
             .first()
@@ -638,24 +657,24 @@ impl ToTokens for ZclCluster {
 
         let ctx_field = match ctx_type {
             None => None,
-            Some(ref ctx_type) => fields
-                .iter()
-                .find(|item| is_ctx_field(item, &ctx_type.to_string()))
+            Some(ref ctx_type) => {
+                fields.iter().find(|item| is_ctx_field(item, &ctx_type.to_string()))
+            }
         };
 
         let other_fields = fields
             .iter()
-            .filter(|item| if let Some(ctx_type) = &ctx_type {
-                !is_ctx_field(item, &ctx_type.to_string())
-            } else {
-                true
+            .filter(|item| {
+                if let Some(ctx_type) = &ctx_type {
+                    !is_ctx_field(item, &ctx_type.to_string())
+                } else {
+                    true
+                }
             })
             .collect::<Vec<_>>();
 
-        let other_field_idents = other_fields
-            .iter()
-            .map(|field| field.ident.clone().unwrap())
-            .collect::<Vec<_>>();
+        let other_field_idents =
+            other_fields.iter().map(|field| field.ident.clone().unwrap()).collect::<Vec<_>>();
 
         let field_names = other_field_idents.iter().map(|field| field.clone());
         let field_names_2 = field_names.clone();
@@ -684,8 +703,7 @@ impl ToTokens for ZclCluster {
         let ZclFrameCommand = quote!(#base_path::frame::ZclFrameCommand);
         let SpecificZclCommand = quote!(#base_path::frame::SpecificZclCommand);
 
-        let ctx_field_ident = ctx_field
-            .map(|field| field.ident.clone().unwrap());
+        let ctx_field_ident = ctx_field.map(|field| field.ident.clone().unwrap());
 
         let ctx_field_ident_iter = ctx_field_ident.iter();
         let ctx_field_ident_iter_2 = ctx_field_ident.iter();

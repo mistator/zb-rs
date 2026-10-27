@@ -27,7 +27,12 @@ impl syn::parse::Parse for BitStructDef {
                 .iter()
                 .map(|field| BitStructField::from_field((*field).clone()))
                 .collect::<syn::Result<Vec<BitStructField>>>()?,
-            _ => return Err(syn::Error::new(strct.span(), "invalid struct, only named fields are supported")),
+            _ => {
+                return Err(syn::Error::new(
+                    strct.span(),
+                    "invalid struct, only named fields are supported",
+                ));
+            }
         };
 
         Ok(Self { repr_ty: as_ty(&repr_ty)?, name, fields })
@@ -36,26 +41,22 @@ impl syn::parse::Parse for BitStructDef {
 
 impl ToTokens for BitStructDef {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        let Self{name, fields, repr_ty, ..} = &self;
+        let Self { name, fields, repr_ty, .. } = &self;
         let mut read_for_loop = TokenStream::new();
         let mut write_for_loop = TokenStream::new();
         let mut field_names = TokenStream::new();
 
         for bit_struct in fields {
-            let BitStructField{field, len, skip, ctx} = &bit_struct;
+            let BitStructField { field, len, skip, ctx } = &bit_struct;
             let field_ty = &field.ty;
             let ctx = match ctx {
                 None => {
                     if let syn::Type::Path(syn::TypePath { path, .. }) = field_ty {
-                        if path.is_ident("bool") {
-                            quote!(())
-                        } else {
-                            quote!(byte::LE)
-                        }
+                        if path.is_ident("bool") { quote!(()) } else { quote!(byte::LE) }
                     } else {
                         quote!(byte::LE)
                     }
-                },
+                }
                 Some(ctx) => quote!(#ctx),
             };
             let field_name = field.ident.clone().unwrap();
@@ -112,7 +113,7 @@ impl ToTokens for BitStructDef {
             });
         }
 
-        tokens.extend(quote!{
+        tokens.extend(quote! {
             impl #name {
                 pub fn get_value(&self) -> #repr_ty {
                     use ::byte::TryWrite;
@@ -192,7 +193,7 @@ pub struct BitStructField {
     pub field: syn::Field,
     pub len: syn::LitInt,
     pub skip: syn::LitInt,
-    pub ctx: Option<syn::Expr>
+    pub ctx: Option<syn::Expr>,
 }
 
 impl BitStructField {
@@ -202,7 +203,7 @@ impl BitStructField {
         let skip = LitInt::new("0", field.span());
 
         let Some(args) = get_attribute(&field.attrs, "bit_struct") else {
-            return Ok(Self { field, len, skip, ctx, })
+            return Ok(Self { field, len, skip, ctx });
         };
 
         let ctx = args.get("ctx").cloned();
@@ -212,4 +213,3 @@ impl BitStructField {
         Ok(Self { field, len, skip, ctx })
     }
 }
-

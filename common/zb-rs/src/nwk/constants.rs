@@ -2,9 +2,9 @@ use embassy_time::Duration;
 
 use crate::common::security::frame::SecurityLevel;
 use crate::common::utils::from_octets;
+use crate::nwk::commands::end_device_timeout_request::DeviceTimeout;
 use zb_types::common::NwkAddress;
 use zb_types::mac::A_MAX_MAC_PAYLOAD_SIZE;
-use crate::nwk::commands::end_device_timeout_request::DeviceTimeout;
 
 pub const NWK_COORDINATOR_ADDRESS: NwkAddress = NwkAddress::ZERO;
 pub const DEFAULT_SECURITY_LEVEL: SecurityLevel = SecurityLevel::EncMic32;
@@ -19,8 +19,10 @@ pub const ROUTE_REQUEST_RETRIES: u8 = 2;
 pub const ROUTE_REQUEST_RETRY_INTERVAL: Duration = Duration::from_millis(0xfe);
 pub const MIN_ROUTE_REQUEST_JITTER_MILLIS: usize = 2;
 pub const MAX_ROUTE_REQUEST_JITTER_MILLIS: usize = 128;
-pub const MIN_ROUTE_REQUEST_JITTER: Duration = Duration::from_millis(MIN_ROUTE_REQUEST_JITTER_MILLIS as u64);
-pub const MAX_ROUTE_REQUEST_JITTER: Duration = Duration::from_millis(MAX_ROUTE_REQUEST_JITTER_MILLIS as u64);
+pub const MIN_ROUTE_REQUEST_JITTER: Duration =
+    Duration::from_millis(MIN_ROUTE_REQUEST_JITTER_MILLIS as u64);
+pub const MAX_ROUTE_REQUEST_JITTER: Duration =
+    Duration::from_millis(MAX_ROUTE_REQUEST_JITTER_MILLIS as u64);
 pub const MAC_FRAME_OVERHEAD: u8 = 0x0b;
 
 pub const MAX_NWK_PAYLOAD_SIZE: usize = A_MAX_MAC_PAYLOAD_SIZE - MIN_HEADER_OVERHEAD;

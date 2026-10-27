@@ -3,7 +3,7 @@
 use core::fmt::Debug;
 use thiserror::Error;
 use zb_types::common::{ExtendedAddress, NwkAddress, PanId};
-use zb_types::mac::{Channel, ChannelMask, MacFrame};
+use zb_types::mac::{Channel, ChannelMask, ReceivedMacFrame};
 
 #[trait_variant::make(Ieee802154Driver: Send)]
 pub trait LocalIeee802154Driver {
@@ -22,8 +22,8 @@ pub trait LocalIeee802154Driver {
     async fn transmit(&mut self, frame: &[u8]) -> Result<(), byte::Error>;
 
     fn flush(&mut self) -> ();
-    fn poll(&mut self) -> Option<MacFrame>;
-    async fn wait_frame(&mut self) -> MacFrame;
+    fn poll(&mut self) -> Option<ReceivedMacFrame>;
+    async fn wait_frame(&mut self) -> ReceivedMacFrame;
 
     fn reset(&mut self, set_default_pib: bool) -> ();
 }
@@ -46,11 +46,11 @@ impl From<byte::Error> for StorageError {
 
 pub trait StoragePool {
     type S: StorageRegion;
-    
+
     fn reserve_region(&mut self, size: u32) -> Result<Self::S, ()>;
 }
 
-pub trait StorageRegion : Clone + Send + Sync {
+pub trait StorageRegion: Clone + Send + Sync {
     fn persist_with_offset(&mut self, offset: u32, buffer: &[u8]) -> Result<(), StorageError>;
     fn load_with_offset(&mut self, offset: u32, buffer: &mut [u8]) -> Result<(), StorageError>;
 

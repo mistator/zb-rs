@@ -2,8 +2,10 @@ use crate::apl::zdo::config::ZbCapabilities;
 use crate::nwk::commands::Command;
 use crate::nwk::commands::rejoin_response::RejoinResponse;
 use crate::nwk::commands::rejoin_response::RejoinResponseCmd;
+use crate::nwk::ctx::{BaseNwkPrivate, InitializedNwk, Nwk, PendingJoin, RoutingState};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
+use crate::nwk::nib::{NeighborRelationship, NewNwkNeighbour, NwkNeighbor};
 use crate::nwk::nlde::JoinMethod;
 use crate::nwk::nlde::NldeTransferError;
 use crate::nwk::nlde::NlmeJoinIndication;
@@ -14,8 +16,6 @@ use crate::unwrap_or_return;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::nwk::ctx::{BaseNwkPrivate, InitializedNwk, Nwk, PendingJoin, RoutingState};
-use crate::nwk::nib::{NeighborRelationship, NewNwkNeighbour, NwkNeighbor};
 
 pub struct RejoinRequestCmd {
     pub dest_short_addr: NwkAddress,
@@ -41,7 +41,8 @@ impl<D: NwkMac, S: StorageRegion> Nwk<PendingJoin, D, S> {
         let addr = self.get_addr();
         self.get_mac_mut().set_short_address(addr.into());
 
-        let frame = NwkFrame::new_cmd_frame(hdr, Command::RejoinRequest(config.capability_information));
+        let frame =
+            NwkFrame::new_cmd_frame(hdr, Command::RejoinRequest(config.capability_information));
 
         self.transmit_frame(&frame, config.dest_short_addr, true)
             .await
@@ -57,9 +58,7 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         let cmd = &frame.cmd;
         let ext_addr = unwrap_or_return!(
             frame.header.source_ieee,
-            Err(NldeTransferError::InvalidRequest(
-                "missing extended address in header"
-            ))
+            Err(NldeTransferError::InvalidRequest("missing extended address in header"))
         );
         let mut nwk_addr = frame.header.source;
 
@@ -72,35 +71,33 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
             }
         }
 
-       let success = self.lock_neighbors_mut(|nbs| {
+        let success = self.lock_neighbors_mut(|nbs| {
             nbs.cleanup();
-            let child = nbs
-                .find_by_ext_addr_and_type_mut(ext_addr, cmd.device_type.into());
-           
-           if let Some(child) = child {
-               child.nwk_addr = nwk_addr;
-               return true;
-           } else {
-               nbs.children.retain(|nb| nb.ext_addr != Option::from(ext_addr));
-               let neighbor = NwkNeighbor::new(NewNwkNeighbour {
-                   ext_addr,
-                   nwk_addr,
-                   device_type: cmd.device_type.into(),
-                   rx_on_when_idle: cmd.receiver_on_when_idle,
-                   relationship: NeighborRelationship::Child,
-               });
-               nbs.children.push(neighbor).is_ok()
-           }
-       });
-        
+            let child = nbs.find_by_ext_addr_and_type_mut(ext_addr, cmd.device_type.into());
+
+            if let Some(child) = child {
+                child.nwk_addr = nwk_addr;
+                return true;
+            } else {
+                nbs.neighbors.retain(|nb| nb.ext_addr != Option::from(ext_addr));
+                let neighbor = NwkNeighbor::new(NewNwkNeighbour {
+                    ext_addr,
+                    nwk_addr,
+                    device_type: cmd.device_type.into(),
+                    rx_on_when_idle: cmd.receiver_on_when_idle,
+                    relationship: NeighborRelationship::Child,
+                });
+                nbs.neighbors.push(neighbor).is_ok()
+            }
+        });
+
         match success {
-            true => match self.send_rejoin_response_cmd(
-                &RejoinResponseCmd {
+            true => match self
+                .send_rejoin_response_cmd(&RejoinResponseCmd {
                     dst_addr: frame.header.source,
                     ext_dst_addr: ext_addr,
                     rejoin_response: RejoinResponse::Success(nwk_addr),
-                },
-            )
+                })
                 .await
             {
                 Ok(_) => {
@@ -113,24 +110,18 @@ impl<T: RoutingState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
                     }))
                 }
                 Err(_) => Ok(None),
-            }
+            },
             false => {
-                self.send_rejoin_response_cmd(
-                    &RejoinResponseCmd {
-                        dst_addr: frame.header.source,
-                        ext_dst_addr: ext_addr,
-                        rejoin_response: RejoinResponse::PanAtCapacity,
-                    },
-                )
-                    .await
-                    .ok();
-                
+                self.send_rejoin_response_cmd(&RejoinResponseCmd {
+                    dst_addr: frame.header.source,
+                    ext_dst_addr: ext_addr,
+                    rejoin_response: RejoinResponse::PanAtCapacity,
+                })
+                .await
+                .ok();
+
                 Ok(None)
             }
         }
-
-
     }
 }
-
-

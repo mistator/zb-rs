@@ -1,9 +1,9 @@
-use byte::TryRead;
 use crate::common::{ExtendedAddress, NwkAddress, PanId};
+use byte::TryRead;
 use byte_derive::{TryRead, TryWrite};
 use ieee802154::mac;
-use ieee802154::mac::command::CapabilityInformation;
 use ieee802154::mac::FooterMode;
+use ieee802154::mac::command::CapabilityInformation;
 use zb_macros::BitStruct;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -144,7 +144,9 @@ impl From<u8> for Channel {
             24 => Channel::Channel24,
             25 => Channel::Channel25,
             26 => Channel::Channel26,
-            _ => { panic!("invalid channel received") }
+            _ => {
+                panic!("invalid channel received")
+            }
         }
     }
 }
@@ -275,13 +277,30 @@ pub struct MacFrame {
 impl TryRead<'_> for MacFrame {
     fn try_read(bytes: &'_ [u8], _: ()) -> byte::Result<(Self, usize)> {
         let (frame, size) = mac::frame::Frame::try_read(bytes, FooterMode::Explicit)?;
-        Ok((Self {
-            header: frame.header,
-            content: frame.content,
-            payload: crate::Vec::<u8, A_MAX_MAC_PAYLOAD_SIZE>::from_slice(frame.payload)
-                .map_err(|_| byte::Error::BadInput {err: "frame too long"})?,
-            footer: frame.footer
-        }, size))
+        Ok((
+            Self {
+                header: frame.header,
+                content: frame.content,
+                payload: crate::Vec::<u8, A_MAX_MAC_PAYLOAD_SIZE>::from_slice(frame.payload)
+                    .map_err(|_| byte::Error::BadInput { err: "frame too long" })?,
+                footer: frame.footer,
+            },
+            size,
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReceivedMacFrame {
+    pub channel: Channel,
+    pub frame: MacFrame,
+    pub rssi: i8,
+    pub lqi: u8,
+}
+
+impl From<MacFrame> for ReceivedMacFrame {
+    fn from(frame: MacFrame) -> Self {
+        ReceivedMacFrame { channel: Channel::Channel11, frame, rssi: 0, lqi: 0 }
     }
 }
 

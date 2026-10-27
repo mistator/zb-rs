@@ -1,5 +1,9 @@
 pub mod header;
 
+use crate::nwk::commands::Command;
+use crate::nwk::constants::MAX_NWK_PAYLOAD_SIZE;
+use crate::nwk::frame::header::DiscoverRoute;
+use crate::nwk::frame::header::FrameType;
 
 use byte::BytesExt;
 use byte::TryRead;
@@ -7,10 +11,6 @@ use byte::TryWrite;
 use byte::ctx::Endian;
 use header::NwkHeader;
 use zb_macros::try_write_impl;
-use crate::nwk::commands::Command;
-use crate::nwk::constants::MAX_NWK_PAYLOAD_SIZE;
-use crate::nwk::frame::header::DiscoverRoute;
-use crate::nwk::frame::header::FrameType;
 use zb_types::common::NwkAddress;
 
 #[derive(Debug, Clone)]
@@ -51,21 +51,33 @@ impl NwkFrame {
         }
     }
 
-    pub fn dst_addr(&self) -> NwkAddress { self.header().destination }
+    pub fn dst_addr(&self) -> NwkAddress {
+        self.header().destination
+    }
 
-    pub fn src_addr(&self) -> NwkAddress { self.header().source }
+    pub fn src_addr(&self) -> NwkAddress {
+        self.header().source
+    }
 
-    pub fn sequence_number(&self) -> u8 { self.header().sequence_number }
+    pub fn sequence_number(&self) -> u8 {
+        self.header().sequence_number
+    }
 
-    pub fn is_secured(&self) -> bool { self.header().control.security }
+    pub fn is_secured(&self) -> bool {
+        self.header().control.security
+    }
 
-    pub fn is_multicast(&self) -> bool { self.header().control.multicast }
+    pub fn is_multicast(&self) -> bool {
+        self.header().control.multicast
+    }
 
     pub fn is_unicast(&self) -> bool {
         !self.header().control.multicast && self.src_addr().is_unicast()
     }
 
-    pub fn is_broadcast(&self) -> bool { self.src_addr().is_broadcast() }
+    pub fn is_broadcast(&self) -> bool {
+        self.src_addr().is_broadcast()
+    }
 
     pub fn is_route_discovery_enabled(&self) -> bool {
         self.header().control.route_discovery == DiscoverRoute::Enable
@@ -91,13 +103,7 @@ impl TryRead<'_, NwkHeader> for NwkFrame {
             )),
             FrameType::NwkCommand => {
                 let cmd = bytes.read_with(offset, ())?;
-                Ok((
-                    Self::NwkCommand(CommandFrame {
-                        header: hdr,
-                        command: cmd,
-                    }),
-                    *offset,
-                ))
+                Ok((Self::NwkCommand(CommandFrame { header: hdr, command: cmd }), *offset))
             }
             FrameType::Reserved => Ok((Self::Reserved(hdr), *offset)),
             FrameType::InterPan => Ok((Self::InterPan(hdr), *offset)),
@@ -141,6 +147,16 @@ impl TryWrite<Endian> for &NwkFrame {
 pub struct NwkDataFrame {
     pub header: NwkHeader,
     pub payload: zb_types::Vec<u8, MAX_NWK_PAYLOAD_SIZE>,
+}
+
+impl NwkDataFrame {
+    pub fn to_frame(self) -> NwkFrame {
+        NwkFrame::Data(self)
+    }
+
+    pub fn as_frame(&self) -> NwkFrame {
+        NwkFrame::Data(self.clone())
+    }
 }
 
 #[derive(Debug, Clone)]

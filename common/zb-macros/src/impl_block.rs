@@ -7,19 +7,23 @@ pub struct ImplBlock {
 }
 
 impl ImplBlock {
-    fn item_to_tokens(&self, item: &syn::ImplItem, receiver: ReceiverKind, tokens: &mut proc_macro2::TokenStream) {
+    fn item_to_tokens(
+        &self,
+        item: &syn::ImplItem,
+        receiver: ReceiverKind,
+        tokens: &mut proc_macro2::TokenStream,
+    ) {
         match item {
             syn::ImplItem::Fn(fn_) => {
                 let syn::ImplItemFn { attrs, vis, sig, .. } = fn_;
                 let fn_name = &sig.ident;
-                let fn_args = sig.inputs
+                let fn_args = sig
+                    .inputs
                     .clone()
                     .into_iter()
-                    .filter_map(|input| {
-                        match input {
-                            FnArg::Receiver(_) => None,
-                            FnArg::Typed(arg) => Some(arg.pat),
-                        }
+                    .filter_map(|input| match input {
+                        FnArg::Receiver(_) => None,
+                        FnArg::Typed(arg) => Some(arg.pat),
                     })
                     .map(|input| input)
                     .collect::<Punctuated<_, syn::Token![,]>>();
@@ -27,7 +31,7 @@ impl ImplBlock {
                 let (receiver_type, receiver) = match receiver {
                     ReceiverKind::Value => (quote!(Self), quote!(self)),
                     ReceiverKind::Reference(_, _, _) => (quote!(&Self), quote!(&self)),
-                    _ => panic!("invalid receiver")
+                    _ => panic!("invalid receiver"),
                 };
 
                 tokens.extend(quote! {
@@ -50,7 +54,11 @@ impl ToTokens for ImplBlock {
         let mut items_stream_ref = proc_macro2::TokenStream::new();
         for item in &self.item_impl.items {
             self.item_to_tokens(item, ReceiverKind::Value, &mut items_stream_value);
-            self.item_to_tokens(item, ReceiverKind::Reference(syn::token::And::default(), None, None), &mut items_stream_ref);
+            self.item_to_tokens(
+                item,
+                ReceiverKind::Reference(syn::token::And::default(), None, None),
+                &mut items_stream_ref,
+            );
         }
 
         let self_ty = match self_ty.as_ref() {
@@ -63,11 +71,11 @@ impl ToTokens for ImplBlock {
 
         let mut trait_tokens = proc_macro2::TokenStream::new();
         match trait_ {
-            None => {},
+            None => {}
             Some((path, for_)) => {
                 path.to_tokens(&mut trait_tokens);
                 for_.to_tokens(&mut trait_tokens);
-            },
+            }
         };
 
         let item_impl = &self.item_impl;

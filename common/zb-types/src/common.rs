@@ -10,9 +10,13 @@ use ieee802154::mac;
 pub struct Key([u8; 16]);
 
 impl Key {
-    pub const fn new(key: [u8; 16]) -> Self { Self(key) }
+    pub const fn new(key: [u8; 16]) -> Self {
+        Self(key)
+    }
 
-    pub fn as_array(&self) -> &[u8; 16] { &self.0 }
+    pub fn as_array(&self) -> &[u8; 16] {
+        &self.0
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, TryRead, TryWrite)]

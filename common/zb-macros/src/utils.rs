@@ -13,12 +13,11 @@ pub(crate) fn int_expr(expr: &syn::Expr) -> syn::Result<syn::LitInt> {
 pub(crate) type AttrArgs = HashMap<String, syn::Expr>;
 
 pub(crate) fn get_attribute(attrs: &Vec<Attribute>, id: &str) -> Option<AttrArgs> {
-    let attr = attrs.iter()
-        .find(|attr| attr.meta.path().is_ident(id))?
-        .clone();
+    let attr = attrs.iter().find(|attr| attr.meta.path().is_ident(id))?.clone();
 
     if let syn::Meta::List(ref meta_list) = attr.meta {
-        let parser = syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
+        let parser =
+            syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated;
         let mut args = AttrArgs::new();
         let meta_args = meta_list.parse_args_with(parser).ok()?;
 
@@ -40,7 +39,7 @@ pub(crate) fn as_ty(expr: &syn::Expr) -> syn::Result<syn::Type> {
 }
 
 pub(crate) fn as_lit_int(expr: &syn::Expr) -> syn::Result<syn::LitInt> {
-    if let Expr::Lit(ExprLit { lit: syn::Lit::Int(lit_int), .. } ) = expr {
+    if let Expr::Lit(ExprLit { lit: syn::Lit::Int(lit_int), .. }) = expr {
         Ok(lit_int.clone())
     } else {
         Err(syn::Error::new_spanned(expr, "expected an integer literal"))
@@ -48,7 +47,7 @@ pub(crate) fn as_lit_int(expr: &syn::Expr) -> syn::Result<syn::LitInt> {
 }
 
 pub(crate) fn as_path(expr: &syn::Expr) -> syn::Result<syn::Path> {
-    if let Expr::Path(ExprPath { path, .. } ) = expr {
+    if let Expr::Path(ExprPath { path, .. }) = expr {
         Ok(path.clone())
     } else {
         Err(syn::Error::new_spanned(expr, "expected an integer literal"))

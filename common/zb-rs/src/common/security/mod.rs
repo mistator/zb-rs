@@ -34,7 +34,9 @@ pub enum SecurityError {
 }
 
 impl From<byte::Error> for SecurityError {
-    fn from(value: byte::Error) -> Self { Self::ParseError(value) }
+    fn from(value: byte::Error) -> Self {
+        Self::ParseError(value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -43,4 +45,3 @@ pub enum SecurityNetworkParams {
     #[default]
     Distributed,
 }
-

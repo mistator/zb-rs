@@ -3,9 +3,10 @@ use byte::TryRead;
 use crate::apl::aps::apsde::ApsdeError;
 use crate::apl::aps::apsde::ApsdeRequest;
 use crate::apl::aps::apsde::{ApsdeAddress, ApsdeDataIndication};
+use crate::apl::aps::ctx::ApsTransmit;
 use crate::apl::aps::types::ApsEndpoint;
-use crate::apl::zb_application::{ZigbeeApplication};
-use crate::apl::zdo::{EndDeviceNodeCtx, ZbNode, ZbNodeJoinedStatus};
+use crate::apl::zb_application::ZigbeeApplication;
+use crate::apl::zdo::{ZbNode, ZbNodeJoinedStatus};
 use crate::apl::zdp::service::OptionalApsdeResult;
 use crate::apl::zdp::service::to_optional;
 use crate::zcl::cluster::types::ZclCluster;
@@ -26,8 +27,6 @@ use crate::zcl::frame::ZclFrameType;
 use crate::zcl::frame::ZclHeader;
 use crate::zcl::types::ZclStatus;
 use zb_hal::{NwkMac, StorageRegion};
-use crate::apl::aps::ctx::ApsTransmit;
-use crate::nwk::ctx::JoinedNwk;
 
 #[derive(Default)]
 pub struct EmitCommandFrameCfg {
@@ -44,10 +43,7 @@ pub struct RequestCfg {
     pub src_endpoint: ApsEndpoint,
 }
 
-async fn persist_application<S: StorageRegion>(
-    stg: &mut S,
-    application: &dyn ZigbeeApplication,
-) {
+async fn persist_application<S: StorageRegion>(stg: &mut S, application: &dyn ZigbeeApplication) {
     let mut buffer = [0u8; 1024];
     let result = application.try_write(&mut buffer);
 
@@ -66,7 +62,10 @@ fn generate_default_response(command_identifier: u8, status: ZclStatus) -> ZclFr
     }))
 }
 
-fn handle_global_command(cmd: &GlobalZclCommand, cluster: &mut dyn ZclCluster) -> Option<ZclFrameCommand> {
+fn handle_global_command(
+    cmd: &GlobalZclCommand,
+    cluster: &mut dyn ZclCluster,
+) -> Option<ZclFrameCommand> {
     let global_cmd = match cmd {
         GlobalZclCommand::ReadAttributes(attrs) => {
             log::info!("received read attributes command: {:?}", attrs);
@@ -76,7 +75,7 @@ fn handle_global_command(cmd: &GlobalZclCommand, cluster: &mut dyn ZclCluster) -
             GlobalZclCommand::ReadAttributesResponse(ReadAttributesResponseCommand {
                 attribute_statuses: zb_types::Vec::from_iter(rsp),
             })
-                .into()
+            .into()
         }
         // GlobalZclCommand::ReadAttributesResponse(_) => {}
         GlobalZclCommand::WriteAttributes(attrs) => {
@@ -85,16 +84,15 @@ fn handle_global_command(cmd: &GlobalZclCommand, cluster: &mut dyn ZclCluster) -
             GlobalZclCommand::WriteAttributesResponse(WriteAttributesResponseCommand {
                 attributes: zb_types::Vec::from_iter(rsp),
             })
-                .into()
+            .into()
         }
         GlobalZclCommand::WriteAttributesUndivided(attrs) => {
-            let rsp = cluster
-                .write_attributes_undivided(attrs);
+            let rsp = cluster.write_attributes_undivided(attrs);
 
             GlobalZclCommand::WriteAttributesResponse(WriteAttributesResponseCommand {
                 attributes: zb_types::Vec::from_iter(rsp),
             })
-                .into()
+            .into()
         }
         // GlobalZclCommand::WriteAttributesResponse(attrs) => {}
         GlobalZclCommand::WriteAttributesNoResponse(attrs) => {
@@ -104,24 +102,21 @@ fn handle_global_command(cmd: &GlobalZclCommand, cluster: &mut dyn ZclCluster) -
         GlobalZclCommand::ConfigureReporting(attrs) => {
             let rsp = cluster.configure_reporting(attrs);
 
-            GlobalZclCommand::ConfigureReportingResponse(
-                ConfigureReportingResponseCommand {
-                    configuration_records: zb_types::Vec::from_iter(rsp),
-                },
-            )
-                .into()
+            GlobalZclCommand::ConfigureReportingResponse(ConfigureReportingResponseCommand {
+                configuration_records: zb_types::Vec::from_iter(rsp),
+            })
+            .into()
         }
         // GlobalZclCommand::ConfigureReportingResponse(_) => {}
         GlobalZclCommand::ReadReportingConfiguration(attrs) => {
-            let rsp =
-                cluster.read_reporting_config(attrs);
+            let rsp = cluster.read_reporting_config(attrs);
 
             GlobalZclCommand::ReadReportingConfigurationResponse(
                 ReadReportingConfigurationResponseCommand {
                     attributes: zb_types::Vec::from_iter(rsp),
                 },
             )
-                .into()
+            .into()
         }
 
         // GlobalZclCommand::ReadReportingConfigurationResponse(_) => {}
@@ -132,13 +127,11 @@ fn handle_global_command(cmd: &GlobalZclCommand, cluster: &mut dyn ZclCluster) -
                 attrs.start_attribute_identifier,
                 attrs.maximum_attribute_identifiers,
             );
-            GlobalZclCommand::DiscoverAttributesResponse(
-                DiscoverAttributesResponseCommand {
-                    discovery_complete: true, // TODO
-                    attributes: zb_types::Vec::from_iter(rsp),
-                },
-            )
-                .into()
+            GlobalZclCommand::DiscoverAttributesResponse(DiscoverAttributesResponseCommand {
+                discovery_complete: true, // TODO
+                attributes: zb_types::Vec::from_iter(rsp),
+            })
+            .into()
         }
         // GlobalZclCommand::DiscoverAttributesResponse(_) => {}
         // GlobalZclCommand::ReadAttributesStructured(_) => {}
@@ -152,22 +145,18 @@ fn handle_global_command(cmd: &GlobalZclCommand, cluster: &mut dyn ZclCluster) -
                     identifiers: Default::default(),
                 },
             )
-                .into()
+            .into()
         }
         // GlobalZclCommand::DiscoverCommandsReceivedResponse(_) => {}
         // GlobalZclCommand::DiscoverCommandsGenerated(_) => {}
         // GlobalZclCommand::DiscoverCommandsGeneratedResponse(_) => {}
         // GlobalZclCommand::DiscoverAttributesExtended(_) => {}
         // GlobalZclCommand::DiscoverAttributesExtendedResponse(_) => {}
-        _ => {
-            None
-        }
+        _ => None,
     };
 
     global_cmd.map(|cmd| ZclFrameCommand::Global(cmd))
 }
-
-
 
 impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
     pub async fn handle_zcl_command(
@@ -175,24 +164,24 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         endpoint: ApsEndpoint,
         indication: &ApsdeDataIndication,
     ) -> OptionalApsdeResult {
-        let (frame, _) =
-            ZclFrame::try_read(&indication.asdu.as_slice(), byte::LE).map_err(|err| ApsdeError::ByteError(err))?;
+        let (frame, _) = ZclFrame::try_read(&indication.asdu.as_slice(), byte::LE)
+            .map_err(|err| ApsdeError::ByteError(err))?;
 
-        let response = self.applications.use_application_mut(endpoint, indication.cluster_id, |cluster| {
-            match frame.command {
+        let response = self
+            .applications
+            .use_application_mut(endpoint, indication.cluster_id, |cluster| match frame.command {
                 ZclFrameCommand::Global(ref cmd) => handle_global_command(cmd, cluster),
-                ZclFrameCommand::Specific(ref cmd) => cluster.handle_custom_command(cmd)
-            }
-        })
+                ZclFrameCommand::Specific(ref cmd) => cluster.handle_custom_command(cmd),
+            })
             .await
             .map_err(|_| ApsdeError::NotSupported("application and cluster not found"))?;
 
         let response = if response.is_none() {
             if indication.dst.is_unicast()
                 && !matches!(
-                frame.command,
-                ZclFrameCommand::Global(GlobalZclCommand::DefaultResponse(_))
-            )
+                    frame.command,
+                    ZclFrameCommand::Global(GlobalZclCommand::DefaultResponse(_))
+                )
                 && !frame.header.frame_control.disable_default_response
             {
                 generate_default_response(frame.header.sequence_number, ZclStatus::Success)
@@ -275,4 +264,3 @@ impl<J: ZbNodeJoinedStatus<D, S>, D: NwkMac, S: StorageRegion> ZbNode<J, D, S> {
         to_optional(self.ctx.get_aps_mut().aps_data_request(apsde_sap_request).await)
     }
 }
-

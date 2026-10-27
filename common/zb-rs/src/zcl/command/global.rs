@@ -281,13 +281,7 @@ impl<C> TryRead<'_, C> for AttributeSelector {
             vec.push(item).ok();
         }
 
-        Ok((
-            Self {
-                identifier,
-                indices: vec,
-            },
-            len * 2 + 1,
-        ))
+        Ok((Self { identifier, indices: vec }, len * 2 + 1))
     }
 }
 

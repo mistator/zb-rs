@@ -7,7 +7,9 @@ use byte_derive::TryWrite;
 
 use crate::apl::aps::types::ApsEndpoint;
 use crate::apl::zdo::config::ZbCapabilities;
-use crate::apl::zdp::types::descriptors::{NodeDescriptor, NodePowerDescriptor, ServerMask, SimpleDescriptor, UserDescriptor};
+use crate::apl::zdp::types::descriptors::{
+    NodeDescriptor, NodePowerDescriptor, ServerMask, SimpleDescriptor, UserDescriptor,
+};
 use crate::common::bytes::WithLength;
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;

@@ -1,4 +1,5 @@
 use crate::nwk::commands::Command;
+use crate::nwk::ctx::{JoinedState, Nwk};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
 use crate::nwk::nlde::NldeTransferError;
@@ -7,8 +8,6 @@ use byte_derive::TryWrite;
 use zb_hal::{NwkMac, StorageRegion};
 use zb_types::common::ExtendedAddress;
 use zb_types::common::NwkAddress;
-use crate::nwk::ctx::{JoinedState, Nwk};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, TryRead, TryWrite)]
 #[repr(u8)]
@@ -55,7 +54,7 @@ impl<T: JoinedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
 
         let frame = NwkFrame::new_cmd_frame(hdr, cmd);
 
-        self.transmit_frame(&frame, config.dest_short_addr, !config.dest_short_addr.is_broadcast()).await
+        self.transmit_frame(&frame, config.dest_short_addr, !config.dest_short_addr.is_broadcast())
+            .await
     }
 }
-

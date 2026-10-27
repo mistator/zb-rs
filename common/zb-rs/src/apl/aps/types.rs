@@ -1,13 +1,15 @@
 use crate::apl::aps::apsde::ApsdeDataIndication;
-use crate::apl::aps::security::types::indications::{ApsmeConfirmKeyIndication, ApsmeRemoveDeviceIndication};
 use crate::apl::aps::security::types::indications::ApsmeTransportKeyIndication;
 use crate::apl::aps::security::types::indications::ApsmeUpdateDeviceIndication;
+use crate::apl::aps::security::types::indications::{
+    ApsmeConfirmKeyIndication, ApsmeRemoveDeviceIndication,
+};
+use crate::nwk::nlde::NlmeLeaveIndication;
 use bounded_integer::BoundedU8;
 use byte::ctx::Endian;
 use byte::{BytesExt, TryRead, TryWrite};
 use zb_macros::try_write_impl;
 use zb_types::common::NwkAddress;
-use crate::nwk::nlde::NlmeLeaveIndication;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SrcAddrMode {
@@ -25,7 +27,9 @@ pub enum ApsAddress {
 }
 
 impl Default for ApsAddress {
-    fn default() -> Self { ApsAddress::Group(NwkAddress::default()) }
+    fn default() -> Self {
+        ApsAddress::Group(NwkAddress::default())
+    }
 }
 
 impl ApsAddress {
@@ -36,7 +40,9 @@ impl ApsAddress {
         }
     }
 
-    pub fn is_unicast(&self) -> bool { !self.is_broadcast() }
+    pub fn is_unicast(&self) -> bool {
+        !self.is_broadcast()
+    }
 
     pub fn is_broadcast(&self) -> bool {
         match self {
@@ -72,7 +78,7 @@ impl ApsEndpoint {
     pub const fn new(value: u8) -> Option<Self> {
         match BoundedU8::<0, 254>::new(value) {
             None => None,
-            Some(value) => Some(Self(value))
+            Some(value) => Some(Self(value)),
         }
     }
 
@@ -86,9 +92,7 @@ impl<'a> TryRead<'a, Endian> for ApsEndpoint {
         let (value, size) = u8::try_read(bytes, ctx)?;
         let slf = Self::new(value).ok_or_else(|| {
             log::warn!("invalid endpoint received for ApsSrcEndpoint: {:?}", value);
-            byte::Error::BadInput {
-                err: "invalid endpoint received for ApsSrcEndpoint",
-            }
+            byte::Error::BadInput { err: "invalid endpoint received for ApsSrcEndpoint" }
         })?;
 
         Ok((slf, size))
@@ -111,5 +115,5 @@ pub enum ApsIndication {
     TransportKey(ApsmeTransportKeyIndication),
     UpdateDevice(ApsmeUpdateDeviceIndication),
     ConfirmKey(ApsmeConfirmKeyIndication),
-    RemoveDevice(ApsmeRemoveDeviceIndication)
+    RemoveDevice(ApsmeRemoveDeviceIndication),
 }

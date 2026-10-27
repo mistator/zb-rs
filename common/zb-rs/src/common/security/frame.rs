@@ -23,7 +23,9 @@ impl AuxFrameHeader {
             ..
         } = self
         else {
-            log::warn!("[CREATE-NONCE] error creating nonce, aux header does not contain source address");
+            log::warn!(
+                "[CREATE-NONCE] error creating nonce, aux header does not contain source address"
+            );
             return Err(SecurityError::InvalidData);
         };
 
@@ -47,7 +49,7 @@ pub struct SecurityControl {
     pub security_level: SecurityLevel,
     #[bit_struct(len = 2)]
     pub key_identifier: KeyIdentifier,
-    pub extended_nonce: bool
+    pub extended_nonce: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, TryRead, TryWrite)]
@@ -65,7 +67,9 @@ pub enum SecurityLevel {
 }
 
 impl SecurityLevel {
-    pub fn is_secured(&self) -> bool { self != &SecurityLevel::None }
+    pub fn is_secured(&self) -> bool {
+        self != &SecurityLevel::None
+    }
 
     pub fn mic_length(&self) -> usize {
         match self {

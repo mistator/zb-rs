@@ -1,28 +1,28 @@
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU8, Ordering};
 use byte::BytesExt;
 use byte::TryRead;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use crate::common::security::SecurityError;
-use crate::common::security::frame::{AuxFrameHeader, SecurityLevel};
 use crate::common::security::frame::KeyIdentifier;
 use crate::common::security::frame::SecurityControl;
+use crate::common::security::frame::{AuxFrameHeader, SecurityLevel};
 use crate::common::security::primitives::CcmZigbee;
 use crate::common::security::primitives::write_and_encrypt_in_place;
+use crate::nwk::ctx::{BaseNwk, InitializedNwk, InitializedState, Nwk};
 use crate::nwk::frame::NwkFrame;
 use crate::nwk::frame::header::NwkHeader;
-use zb_hal::{NwkMac, StorageRegion};
-use zb_types::common::{ExtendedAddress, Key};
+use crate::nwk::nib::NetworkSecurityMaterialDescriptorSet;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use crate::nwk::ctx::{BaseNwk, InitializedNwk, InitializedState, Nwk};
-use crate::nwk::nib::NetworkSecurityMaterialDescriptorSet;
+use zb_hal::{NwkMac, StorageRegion};
+use zb_types::common::ExtendedAddress;
 
 pub struct EncryptedFrameParams {
     pub ext_addr: ExtendedAddress,
     pub security_level: SecurityLevel,
     pub active_key_seq_number: Arc<AtomicU8>,
-    pub keys: Arc<Mutex<CriticalSectionRawMutex, NetworkSecurityMaterialDescriptorSet>>
+    pub keys: Arc<Mutex<CriticalSectionRawMutex, NetworkSecurityMaterialDescriptorSet>>,
 }
 
 pub fn make_encrypted_frame(
@@ -39,52 +39,54 @@ pub fn make_encrypted_frame(
     };
 
     let mut should_persist = false;
-    let result = unsafe { params.keys.lock_mut(|keys| {
-        let sec_material = keys
-            .iter_mut()
-            .find(|k| k.key_seq_number == params.active_key_seq_number.load(Ordering::Relaxed))
-            .ok_or(SecurityError::KeyNotFound)?;
+    let result = unsafe {
+        params.keys.lock_mut(|keys| {
+            let sec_material = keys
+                .iter_mut()
+                .find(|k| k.key_seq_number == params.active_key_seq_number.load(Ordering::Relaxed))
+                .ok_or(SecurityError::KeyNotFound)?;
 
-        if sec_material.outgoing_frame_counter == u32::MAX {
-            return Err(SecurityError::InvalidData);
-        }
-
-        let aux_hdr = AuxFrameHeader {
-            security_control,
-            frame_counter: sec_material.outgoing_frame_counter,
-            key_sequence_number: Some(sec_material.key_seq_number),
-            source_address: Some(params.ext_addr),
-        };
-
-        let result = match frame {
-            NwkFrame::Data(frame) => write_and_encrypt_in_place(
-                params.security_level,
-                buffer,
-                aux_hdr,
-                sec_material.key,
-                frame.header.clone(),
-                frame.payload.as_slice(),
-            ),
-            NwkFrame::NwkCommand(frame) => write_and_encrypt_in_place(
-                params.security_level,
-                buffer,
-                aux_hdr,
-                sec_material.key,
-                frame.header.clone(),
-                frame.command.clone(),
-            ),
-            _ => {
+            if sec_material.outgoing_frame_counter == u32::MAX {
                 return Err(SecurityError::InvalidData);
             }
-        };
 
-        if result.is_ok() {
-            sec_material.outgoing_frame_counter += 1;
-            should_persist = (sec_material.outgoing_frame_counter - 1) % 1024 == 0;
-        }
+            let aux_hdr = AuxFrameHeader {
+                security_control,
+                frame_counter: sec_material.outgoing_frame_counter,
+                key_sequence_number: Some(sec_material.key_seq_number),
+                source_address: Some(params.ext_addr),
+            };
 
-        result
-    })? };
+            let result = match frame {
+                NwkFrame::Data(frame) => write_and_encrypt_in_place(
+                    params.security_level,
+                    buffer,
+                    aux_hdr,
+                    sec_material.key,
+                    frame.header.clone(),
+                    frame.payload.as_slice(),
+                ),
+                NwkFrame::NwkCommand(frame) => write_and_encrypt_in_place(
+                    params.security_level,
+                    buffer,
+                    aux_hdr,
+                    sec_material.key,
+                    frame.header.clone(),
+                    frame.command.clone(),
+                ),
+                _ => {
+                    return Err(SecurityError::InvalidData);
+                }
+            };
+
+            if result.is_ok() {
+                sec_material.outgoing_frame_counter += 1;
+                should_persist = (sec_material.outgoing_frame_counter - 1) % 1024 == 0;
+            }
+
+            result
+        })?
+    };
 
     if should_persist {
         //ctx.persist().await.ok();
@@ -100,14 +102,17 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         frame: &NwkFrame,
         buffer: &mut [u8],
     ) -> Result<usize, SecurityError> {
-         make_encrypted_frame(frame, buffer, &EncryptedFrameParams {
-            ext_addr: self.get_ext_addr(),
-            security_level: self.get_profile().nwk_security_level,
-            active_key_seq_number: self.get_active_key_seq_number().clone(),
-            keys: self.get_security_material_set().clone()
-        })
+        make_encrypted_frame(
+            frame,
+            buffer,
+            &EncryptedFrameParams {
+                ext_addr: self.get_ext_addr(),
+                security_level: self.get_profile().nwk_security_level,
+                active_key_seq_number: self.get_active_key_seq_number().clone(),
+                keys: self.get_security_material_set().clone(),
+            },
+        )
     }
-
 
     pub fn decrypt_frame(
         &self,
@@ -115,10 +120,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
     ) -> Result<(NwkFrame, bool), SecurityError> {
         let (nwk_hdr, nwk_hdr_len) = NwkHeader::try_read(frame_buffer, byte::LE)?;
         if !nwk_hdr.control.security {
-            return Ok((
-                NwkFrame::try_read(&frame_buffer[nwk_hdr_len..], nwk_hdr)?.0,
-                false,
-            ));
+            return Ok((NwkFrame::try_read(&frame_buffer[nwk_hdr_len..], nwk_hdr)?.0, false));
         }
 
         // Sec 4.3.1.2: overwrite the security level with the value from the NIB
@@ -135,19 +137,13 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         }
 
         // 2) select the key from NIB
-        let sec_material = self
-            .get_security_material_set()
-            .lock(|items| {
-                items
-                    .iter()
-                    .find(|k| {
-                        aux_hdr
-                            .key_sequence_number
-                            .is_some_and(|ksn| ksn == k.key_seq_number)
-                    })
-                    .ok_or(SecurityError::Unspecified)
-                    .cloned()
-            })?;
+        let sec_material = self.get_security_material_set().lock(|items| {
+            items
+                .iter()
+                .find(|k| aux_hdr.key_sequence_number.is_some_and(|ksn| ksn == k.key_seq_number))
+                .ok_or(SecurityError::Unspecified)
+                .cloned()
+        })?;
 
         // 3) check if frame_counter is equal or greater of the NIB
         let Some(source_address) = aux_hdr.source_address else {
@@ -172,9 +168,7 @@ impl<T: InitializedState, D: NwkMac, S: StorageRegion> Nwk<T, D, S> {
         let (aad, frame) = frame_buffer.split_at_mut(nwk_hdr_len + aux_hdr_len);
         let (data, tag) = frame.split_at_mut(frame.len() - mic_length);
 
-        let ccm = CcmZigbee {
-            key: sec_material.key,
-        };
+        let ccm = CcmZigbee { key: sec_material.key };
 
         ccm.decrypt_in_place(aad, data, tag, &aux_hdr.create_nonce().unwrap())?;
 
@@ -190,15 +184,14 @@ mod tests {
     use zb_types::Vec;
     use zb_types::common::{ExtendedAddress, NwkAddress};
 
-    const NWK_FRAME_PAYLOAD: [u8; 17] = [
-        0x0, 0x1, 0x4, 0xb, 0x4, 0x1, 0x1, 0x56, 0x10, 0xae, 0x0, 0x5, 0x5, 0x8, 0x5, 0xb, 0x5
-    ];
+    const NWK_FRAME_PAYLOAD: [u8; 17] =
+        [0x0, 0x1, 0x4, 0xb, 0x4, 0x1, 0x1, 0x56, 0x10, 0xae, 0x0, 0x5, 0x5, 0x8, 0x5, 0xb, 0x5];
     const ENC_NWK_FRAME_FRAME_COUNTER: u32 = 6534680;
     const ENC_NWK_FRAME_SRC_ADDR: ExtendedAddress = ExtendedAddress(0x00124b002f8f7a60);
     const ENC_NWK_FRAME: [u8; 43] = [
-        0x48, 0x2, 0x85, 0x3c, 0x0, 0x0, 0x1e, 0x10, 0x28, 0x18, 0xb6, 0x63, 0x0, 0x60, 0x7a,
-        0x8f, 0x2f, 0x0, 0x4b, 0x12, 0x0, 0x0, 0x38, 0xd7, 0xb2, 0x1c, 0xa5, 0xc9, 0x44, 0x6e,
-        0xef, 0xca, 0x8d, 0x96, 0xd5, 0x3e, 0xb2, 0x35, 0x8b, 0x8, 0x88, 0x17, 0xd4
+        0x48, 0x2, 0x85, 0x3c, 0x0, 0x0, 0x1e, 0x10, 0x28, 0x18, 0xb6, 0x63, 0x0, 0x60, 0x7a, 0x8f,
+        0x2f, 0x0, 0x4b, 0x12, 0x0, 0x0, 0x38, 0xd7, 0xb2, 0x1c, 0xa5, 0xc9, 0x44, 0x6e, 0xef,
+        0xca, 0x8d, 0x96, 0xd5, 0x3e, 0xb2, 0x35, 0x8b, 0x8, 0x88, 0x17, 0xd4,
     ];
 
     #[test]
